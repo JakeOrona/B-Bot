@@ -1,0 +1,5 @@
+# Add Twitter/X artist usernames below (one per line)
+# Lines starting with # are comments and will be ignored
+Macbaconai
+ultra_arcane
+babs69420

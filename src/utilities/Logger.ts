@@ -1,0 +1,107 @@
+/**
+ * Logger: Utility class for logging messages with timestamps
+ */
+
+import fs from 'fs';
+import path from 'path';
+import { ScraperErrorType } from '../interfaces/ScraperTypes';
+
+export class Logger {
+  private static instance: Logger;
+  private logFilePath: string;
+  
+  /**
+   * Private constructor for singleton pattern
+   */
+  private constructor() {
+    const logDir = path.join(process.cwd(), 'logs');
+    
+    // Create logs directory if it doesn't exist
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
+    }
+    
+    // Create a timestamped log file
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    this.logFilePath = path.join(logDir, `scraper-${timestamp}.log`);
+    
+    // Initialize log file with header
+    this.writeToFile('=== TWITTER/X IMAGE SCRAPER LOG ===');
+    this.writeToFile(`Started: ${new Date().toLocaleString()}`);
+    this.writeToFile('=====================================\n');
+  }
+  
+  /**
+   * Get the singleton instance
+   */
+  public static getInstance(): Logger {
+    if (!Logger.instance) {
+      Logger.instance = new Logger();
+    }
+    return Logger.instance;
+  }
+  
+  /**
+   * Log an informational message
+   * @param message Message to log
+   */
+  public info(message: string): void {
+    const formattedMessage = `[INFO] [${this.getTimestamp()}] ${message}`;
+    console.log(formattedMessage);
+    this.writeToFile(formattedMessage);
+  }
+  
+  /**
+   * Log a warning message
+   * @param message Message to log
+   */
+  public warn(message: string): void {
+    const formattedMessage = `[WARN] [${this.getTimestamp()}] ${message}`;
+    console.warn(formattedMessage);
+    this.writeToFile(formattedMessage);
+  }
+  
+  /**
+   * Log an error message
+   * @param message Error message
+   * @param error Error object
+   */
+  public error(message: string, error?: Error, type?: ScraperErrorType): void {
+    const errorType = type ? `[${type}] ` : '';
+    const errorMessage = error ? `: ${error.message}` : '';
+    const formattedMessage = `[ERROR] ${errorType}[${this.getTimestamp()}] ${message}${errorMessage}`;
+    
+    console.error(formattedMessage);
+    this.writeToFile(formattedMessage);
+    
+    // If there's a stack trace, also log it
+    if (error && error.stack) {
+      this.writeToFile(`Stack trace: ${error.stack}`);
+    }
+  }
+  
+  /**
+   * Log a successful action
+   * @param message Success message
+   */
+  public success(message: string): void {
+    const formattedMessage = `[SUCCESS] [${this.getTimestamp()}] ${message}`;
+    console.log(formattedMessage);
+    this.writeToFile(formattedMessage);
+  }
+  
+  /**
+   * Write a message to the log file
+   * @param message Message to write
+   */
+  private writeToFile(message: string): void {
+    fs.appendFileSync(this.logFilePath, `${message}\n`);
+  }
+  
+  /**
+   * Get current timestamp for logs
+   */
+  private getTimestamp(): string {
+    return new Date().toISOString();
+  }
+}
