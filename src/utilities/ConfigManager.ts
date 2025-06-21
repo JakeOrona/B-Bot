@@ -149,9 +149,25 @@ export class ConfigManager {
         'MAX_SCROLLS=10\n' +
         'RATE_LIMIT_DELAY=2000\n' +
         'MAX_RETRIES=3\n' +
-        'RETRY_DELAY=5000\n';
+        'RETRY_DELAY=5000\n\n' +
+        '# Google Drive Configuration\n' +
+        'GOOGLE_DRIVE_ENABLED=false\n' +
+        'GOOGLE_DRIVE_CREDENTIALS_PATH=config/google-service-account.json\n' +
+        'GOOGLE_DRIVE_ROOT_FOLDER_ID=your_root_folder_id_here\n';
       
       fs.writeFileSync(envFilePath, defaultEnv);
     }
+  }
+
+  /**
+   * Get Google Drive configuration from environment variables
+   * @returns Google Drive configuration
+   */
+  public getGoogleDriveConfig() {
+    return {
+        enableUpload: process.env.GOOGLE_DRIVE_ENABLED === 'true',
+        credentialsPath: path.join(process.cwd(), process.env.GOOGLE_DRIVE_CREDENTIALS_PATH || 'config/google-service-account.json'),
+        rootFolderId: process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || ''
+    };
   }
 }

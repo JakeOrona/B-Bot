@@ -6,13 +6,17 @@ import { Browser, BrowserContext, Page } from 'playwright';
 import { BasePage } from './BasePage';
 import { ImageData, ScraperConfig, ScraperError, ScraperErrorType } from '../interfaces/ScraperTypes';
 import { ImageDownloader } from '../utilities/ImageDownloader';
+import { GoogleDriveUploader } from '../utilities/GoogleDriveUploader';
+import { FileCleanup } from '../utilities/FileCleanup';
 import fs from 'fs';
 import path from 'path';
 
 export class TwitterScraper extends BasePage {
   private config: ScraperConfig;
   private imageDownloader: ImageDownloader;
+  private googleDriveUploader?: GoogleDriveUploader;
   private currentUsername: string = '';
+  private downloadedImagePaths: string[] = [];
   
   /**
    * Constructor for TwitterScraper
@@ -30,6 +34,19 @@ export class TwitterScraper extends BasePage {
     super(page, context, browser);
     this.config = config;
     this.imageDownloader = new ImageDownloader(config.downloadPath);
+    
+    // Initialize Google Drive uploader if enabled
+    if (config.googleDrive?.enableUpload && config.googleDrive?.rootFolderId) {
+      try {
+        this.googleDriveUploader = new GoogleDriveUploader(
+          config.googleDrive.credentialsPath,
+          config.googleDrive.rootFolderId
+        );
+        this.logger.info('Google Drive integration enabled');
+      } catch (error) {
+        this.logger.error('Failed to initialize Google Drive uploader', error as Error);
+      }
+    }
   }
   
   // Profile and navigation locators
@@ -227,7 +244,7 @@ export class TwitterScraper extends BasePage {
                     if (match) {
                         tweetId = match[1];
                         break;
-                    }
+                      }
                 }
             }
             
@@ -305,6 +322,9 @@ export class TwitterScraper extends BasePage {
       fs.mkdirSync(userDir, { recursive: true });
     }
     
+    // Reset the downloaded paths array for this batch
+    this.downloadedImagePaths = [];
+    
     // Download each image with rate limiting
     let successful = 0;
     let failed = 0;
@@ -314,9 +334,14 @@ export class TwitterScraper extends BasePage {
       const imageData = imageDataList[i];
       
       try {
-        // Download the image
-        await this.imageDownloader.downloadImage(imageData);
+        // Download the image and get the local path
+        const localPath = await this.imageDownloader.downloadImage(imageData);
         successful++;
+        
+        // Track downloaded path for later batch upload
+        if (localPath) {
+          this.downloadedImagePaths.push(localPath);
+        }
         
         // Log progress periodically
         if (successful % 10 === 0 || successful === imageDataList.length) {
@@ -342,6 +367,18 @@ export class TwitterScraper extends BasePage {
       `Completed downloading images for ${this.currentUsername}: ` +
       `${successful} successful, ${failed} failed, ${skipped} skipped`
     );
+    
+    // Upload to Google Drive if enabled
+    if (this.config.googleDrive?.enableUpload && this.googleDriveUploader && this.downloadedImagePaths.length > 0) {
+      this.logger.info(`Starting batch upload of ${this.downloadedImagePaths.length} images to Google Drive`);
+      try {
+        const uploadResult = await this.googleDriveUploader.batchUpload(this.downloadedImagePaths, this.currentUsername);
+        this.logger.success(`Google Drive upload completed: ${uploadResult.successful}/${uploadResult.total} successful`);
+      } catch (error) {
+        this.logger.error('Google Drive upload failed', error as Error);
+        // Continue execution - upload failure shouldn't halt the scraping process
+      }
+    }
     
     return { successful, failed, skipped, total: imageDataList.length };
   }
@@ -397,5 +434,19 @@ export class TwitterScraper extends BasePage {
       this.cellDivLocator,
       this.page.locator('[data-testid*="tweet"]')
     ];
+  }
+  
+  /**
+   * Clean up old files based on retention policy
+   * @param daysToKeep Number of days to keep files (default: 3)
+   */
+  public async cleanupOldFiles(daysToKeep: number = 3): Promise<void> {
+    try {
+      this.logger.info(`Starting cleanup of files older than ${daysToKeep} days`);
+      await FileCleanup.cleanupOldFiles(this.config.downloadPath, daysToKeep);
+    } catch (error) {
+      this.logger.error('File cleanup failed', error as Error);
+      // Continue execution - cleanup failure shouldn't halt the scraping process
+    }
   }
 }

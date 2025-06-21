@@ -36,7 +36,15 @@ class TwitterImageScraper {
       // Create default config files if they don't exist
       this.configManager.createDefaultConfigFiles();
       
+      // Get scraper configuration
       const config = this.configManager.getScraperConfig();
+      
+      // Add Google Drive configuration if enabled
+      const googleDriveConfig = this.configManager.getGoogleDriveConfig();
+      if (googleDriveConfig.enableUpload) {
+        config.googleDrive = googleDriveConfig;
+        this.logger.info('Google Drive integration enabled');
+      }
       
       this.logger.info('Starting Twitter/X Image Scraper');
       this.logger.info(`Headless mode: ${config.headless ? 'enabled' : 'disabled'}`);
@@ -143,6 +151,9 @@ class TwitterImageScraper {
       // Log download stats
       const stats = twitterScraper.getDownloadStats();
       this.logger.success(`Scraping completed. Downloaded ${stats.successful}/${stats.total} images`);
+      
+      // Clean up old files based on retention policy (keep files for 3 days by default)
+      await twitterScraper.cleanupOldFiles(3);
       
       // Logout
       await twitterAuth.logout();

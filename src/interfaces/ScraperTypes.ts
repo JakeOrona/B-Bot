@@ -11,6 +11,15 @@ export interface AuthCredentials {
 }
 
 /**
+ * Google Drive configuration interface
+ */
+export interface GoogleDriveConfig {
+  enableUpload: boolean;
+  credentialsPath: string;
+  rootFolderId: string;
+}
+
+/**
  * Configuration interface for the scraper
  */
 export interface ScraperConfig {
@@ -21,6 +30,7 @@ export interface ScraperConfig {
   rateLimitDelay: number;
   maxRetries: number;
   retryDelay: number;
+  googleDrive?: GoogleDriveConfig;
 }
 
 /**
@@ -92,4 +102,14 @@ export class ScraperError extends Error {
     this.type = type;
     this.name = 'ScraperError';
   }
+}
+
+/**
+ * Upload result interface for Google Drive uploads
+ */
+export interface UploadResult {
+  successful: number;
+  failed: number;
+  skipped: number;
+  total: number;
 }
