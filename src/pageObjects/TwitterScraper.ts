@@ -32,6 +32,26 @@ export class TwitterScraper extends BasePage {
     this.imageDownloader = new ImageDownloader(config.downloadPath);
   }
   
+  // Profile and navigation locators
+  private readonly emptyStateLocator = this.page.locator('div[data-testid="emptyState"]');
+  
+  // Media and tweet locators
+  private readonly tweetPhotoLocator = this.page.locator('[data-testid="tweetPhoto"]');
+  private readonly tweetLocator = this.page.locator('article[data-testid="tweet"]');
+  
+  // Account status locators
+  private readonly privateAccountLocator = this.page.locator('span:has-text("These posts are protected")');
+  private readonly suspendedAccountLocator = this.page.locator('span:has-text("Account suspended")');
+  
+  /**
+   * Get the media tab locator for a specific user
+   * @param username Twitter username
+   * @returns Locator for the media tab
+   */
+  private getMediaTabLocator(username: string) {
+    return this.page.locator(`a[href="/${username}/media"]`);
+  }
+  
   /**
    * Navigate to a Twitter profile
    * @param username Twitter username to navigate to
@@ -44,7 +64,7 @@ export class TwitterScraper extends BasePage {
       await this.navigateWithRetry(profileUrl, this.config.maxRetries, this.config.retryDelay);
       
       // Check if profile exists
-      if (await this.elementExists('div[data-testid="emptyState"]')) {
+      if (await this.emptyStateLocator.isVisible()) {
         throw new ScraperError(
           `Profile not found or is private: ${username}`,
           ScraperErrorType.NAVIGATION_ERROR
@@ -52,8 +72,9 @@ export class TwitterScraper extends BasePage {
       }
       
       // Click on "Media" tab to show only media tweets
-      await this.waitForSelector(`a[href="/${username}/media"]`);
-      await this.page.click(`a[href="/${username}/media"]`);
+      const mediaTabLocator = this.getMediaTabLocator(username);
+      await mediaTabLocator.waitFor({ state: 'visible' });
+      await mediaTabLocator.click();
       await this.page.waitForLoadState('networkidle');
       
       this.logger.info(`Successfully navigated to ${username}'s media timeline`);
@@ -129,6 +150,8 @@ export class TwitterScraper extends BasePage {
     try {
       this.logger.info(`Extracting image URLs from ${this.currentUsername}'s media`);
       
+      // For complex operations like this where we need to extract data from the DOM,
+      // we need to use page.evaluate to perform DOM manipulation directly
       const imageData = await this.page.evaluate((username) => {
         const images: {url: string, tweetId: string, username: string, index: number}[] = [];
         
@@ -265,7 +288,7 @@ export class TwitterScraper extends BasePage {
    * @returns true if the account is private
    */
   public async isPrivateAccount(): Promise<boolean> {
-    const isPrivate = await this.elementExists('span:has-text("These posts are protected")');
+    const isPrivate = await this.privateAccountLocator.isVisible();
     if (isPrivate) {
       this.logger.warn(`Account @${this.currentUsername} is private`);
     }
@@ -277,7 +300,7 @@ export class TwitterScraper extends BasePage {
    * @returns true if the account is suspended
    */
   public async isSuspendedAccount(): Promise<boolean> {
-    const isSuspended = await this.elementExists('span:has-text("Account suspended")');
+    const isSuspended = await this.suspendedAccountLocator.isVisible();
     if (isSuspended) {
       this.logger.warn(`Account @${this.currentUsername} is suspended`);
     }

@@ -22,6 +22,24 @@ export class TwitterAuth extends BasePage {
     super(page, context, browser);
   }
   
+  // Locators - Authentication related
+  private readonly usernameInput = this.page.getByRole('textbox', { name: 'Phone, email, or username' });
+  private readonly nextButton = this.page.getByRole('button', { name: 'Next' });
+  private readonly passwordInput = this.page.getByRole('textbox', { name: 'password' });
+  private readonly loginButton = this.page.getByTestId('LoginForm_Login_Button');
+  private readonly passwordField = this.page.locator('input[name="password"]');
+  
+  // Verification related locators
+  private readonly verificationInput = this.page.getByTestId('ocfEnterTextTextInput');
+  private readonly verificationNextButton = this.page.getByTestId('ocfEnterTextNextButton');
+  private readonly twoFactorInput = this.page.locator('input[data-testid="LoginForm_CodeInput"]');
+  
+  // Navigation and profile locators
+  private readonly homeTabLink = this.page.getByTestId('AppTabBar_Home_Link');
+  private readonly accountMenuButton = this.page.getByTestId('SideNav_AccountSwitcher_Button');
+  private readonly logoutButton = this.page.getByTestId('AccountSwitcher_Logout_Button');
+  private readonly confirmLogoutButton = this.page.getByTestId('confirmationSheetConfirm');
+  
   /**
    * Login to Twitter with username and password
    * @param credentials Twitter login credentials
@@ -113,11 +131,11 @@ export class TwitterAuth extends BasePage {
     await this.navigateWithRetry(this.loginUrl);
     
     // Wait for the login form
-    await this.page.getByRole('textbox', { name: 'Phone, email, or username' }).waitFor({ state: 'visible' });
+    await this.usernameInput.waitFor({ state: 'visible' });
 
     // Fill in username
-    await this.page.getByRole('textbox', { name: 'Phone, email, or username' }).fill(credentials.username);
-    await this.page.getByRole('button', { name: 'Next' }).click();
+    await this.usernameInput.fill(credentials.username);
+    await this.nextButton.click();
 
     // Check for verification challenge (unusual login activity)
     const hasVerificationChallenge = await this.elementExists('input[data-testid="ocfEnterTextTextInput"]');
@@ -129,8 +147,8 @@ export class TwitterAuth extends BasePage {
     await this.waitForSelector('input[name="password"]');
     
     // Fill in password
-    await this.page.getByRole('textbox', { name: 'password' }).fill(credentials.password);
-    await this.page.getByTestId('LoginForm_Login_Button').click();
+    await this.passwordInput.fill(credentials.password);
+    await this.loginButton.click();
 
     // Wait for navigation to complete
     await this.page.waitForTimeout(1000); // Wait a bit for the login process to complete
@@ -154,8 +172,8 @@ export class TwitterAuth extends BasePage {
     this.logger.info('Detected verification challenge');
     
     // Enter username or email in the verification field
-    await this.page.getByTestId('ocfEnterTextTextInput').fill(credentials.username);
-    await this.page.getByTestId('ocfEnterTextNextButton').click();
+    await this.verificationInput.fill(credentials.username);
+    await this.verificationNextButton.click();
 
     // Wait for the challenge to be processed
     await this.page.waitForLoadState('networkidle');
@@ -168,7 +186,7 @@ export class TwitterAuth extends BasePage {
    */
   private async handle2FA(): Promise<void> {
     // Check if 2FA input is present
-    const has2FA = await this.elementExists('input[data-testid="LoginForm_CodeInput"]');
+    const has2FA = await this.twoFactorInput.isVisible();
     
     if (!has2FA) {
       return; // No 2FA required
@@ -194,7 +212,7 @@ export class TwitterAuth extends BasePage {
   private async verifyLoggedIn(): Promise<boolean> {
     try {
       // Check for elements that should be present after login
-      const isLoggedIn = await this.page.getByTestId('AppTabBar_Home_Link').isVisible();
+      const isLoggedIn = await this.homeTabLink.isVisible();
       return isLoggedIn;
     } catch (error) {
       return false;
@@ -207,13 +225,13 @@ export class TwitterAuth extends BasePage {
   public async logout(): Promise<void> {
     try {
       // Click on account menu
-      await this.page.getByTestId('SideNav_AccountSwitcher_Button').click();
+      await this.accountMenuButton.click();
       
       // Click on logout option
-      await this.page.getByTestId('AccountSwitcher_Logout_Button').click();
+      await this.logoutButton.click();
       
       // Confirm logout
-      await this.page.getByTestId('confirmationSheetConfirm').click();
+      await this.confirmLogoutButton.click();
 
       // Wait for logout to complete
       await this.page.waitForTimeout(1000); // Wait a bit for the logout process to complete
