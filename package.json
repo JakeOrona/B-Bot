@@ -11,6 +11,7 @@
     "start": "ts-node src/index.ts",
     "scrape": "ts-node src/index.ts --scrape-only",
     "upload": "ts-node src/index.ts --upload-only",
+    "debug-drive": "ts-node src/index.ts --debug-drive",
     "help": "node ./bin/help.js",
     "test": "npx playwright test",
     "test:ui": "npx playwright test --ui",

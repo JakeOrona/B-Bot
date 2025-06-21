@@ -45,6 +45,100 @@ export class GoogleDriveUploader {
     }
     
     /**
+     * Debug method to test Google Drive folder access
+     * @returns Promise resolving when tests are complete
+     */
+    public async debugFolderAccess(): Promise<void> {
+        try {
+            // Display service account email
+            const about = await this.drive.about.get({
+                fields: 'user'
+            });
+            
+            this.logger.info(`Service Account Email: ${about.data.user?.emailAddress}`);
+            this.logger.info(`Testing access to root folder ID: ${this.rootFolderId}`);
+            
+            // Test 1: Check if we can access the root folder directly
+            try {
+                const folder = await this.drive.files.get({
+                    fileId: this.rootFolderId,
+                    fields: 'id, name, parents, mimeType'
+                });
+                
+                this.logger.info(`Root folder found: ${folder.data.name} (ID: ${folder.data.id})`);
+                if (folder.data.mimeType !== 'application/vnd.google-apps.folder') {
+                    this.logger.warn(`WARNING: The ID provided is not a folder! Type: ${folder.data.mimeType}`);
+                }
+            } catch (error) {
+                this.logger.error('Root folder access failed', error as Error);
+                this.logger.error('CRITICAL: The root folder ID is invalid or the service account does not have permission');
+                
+                if ((error as any).code === 404) {
+                    this.logger.error('Error 404: Folder not found. Please check if the folder ID is correct.');
+                } else if ((error as any).code === 403) {
+                    this.logger.error('Error 403: Permission denied. The service account does not have access to this folder.');
+                    this.logger.error('Make sure you shared the folder with the service account email and gave it "Editor" permission.');
+                }
+                
+                throw error;
+            }
+            
+            // Test 2: Try to list contents of root folder
+            try {
+                const contents = await this.drive.files.list({
+                    q: `'${this.rootFolderId}' in parents and trashed = false`,
+                    fields: 'files(id, name, mimeType)',
+                    pageSize: 10
+                });
+                
+                const files = contents.data.files;
+                this.logger.info(`Root folder contains ${files?.length || 0} items`);
+                
+                if (files && files.length > 0) {
+                    this.logger.info('First 5 items in the root folder:');
+                    files.slice(0, 5).forEach(file => {
+                        const type = file.mimeType === 'application/vnd.google-apps.folder' ? 'Folder' : 'File';
+                        this.logger.info(`- ${type}: ${file.name}`);
+                    });
+                }
+            } catch (error) {
+                this.logger.error('Failed to list folder contents', error as Error);
+                throw error;
+            }
+            
+            // Test 3: Try to create a test folder
+            try {
+                const testFolder = await this.drive.files.create({
+                    requestBody: {
+                        name: 'TEST_FOLDER_DELETE_ME',
+                        mimeType: 'application/vnd.google-apps.folder',
+                        parents: [this.rootFolderId]
+                    },
+                    fields: 'id, name'
+                });
+                
+                this.logger.info(`Test folder created successfully: ${testFolder.data.name} (ID: ${testFolder.data.id})`);
+                
+                // Clean up test folder
+                await this.drive.files.delete({ 
+                    fileId: testFolder.data.id as string 
+                });
+                this.logger.info('Test folder deleted successfully');
+                
+                this.logger.success('All Google Drive access tests passed successfully! ✅');
+                this.logger.info('Your Google Drive configuration appears to be correct.');
+            } catch (error) {
+                this.logger.error('Failed to create test folder', error as Error);
+                this.logger.error('This suggests the service account does not have write permissions to the folder');
+                throw error;
+            }
+        } catch (error) {
+            this.logger.error('Google Drive debug tests failed', error as Error);
+            throw error;
+        }
+    }
+    
+    /**
      * Batch upload files to Google Drive
      * @param localPaths Array of local file paths to upload
      * @param username Twitter username for folder structure

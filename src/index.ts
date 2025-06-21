@@ -424,6 +424,76 @@ class TwitterImageScraper {
   }
   
   /**
+   * Debug Google Drive configuration and permissions
+   * Runs diagnostics on the Google Drive setup
+   */
+  public async debugGoogleDrive(): Promise<void> {
+    this.logger.info('=== Google Drive Debug Mode ===');
+    
+    try {
+      // Get Google Drive configuration
+      const googleDriveConfig = this.configManager.getGoogleDriveConfig();
+      
+      // Check if Google Drive is enabled
+      if (!googleDriveConfig.enableUpload) {
+        this.logger.error('Google Drive upload is not enabled in configuration');
+        this.logger.info('Set GOOGLE_DRIVE_ENABLED=true in your config/.env file');
+        return;
+      }
+      
+      this.logger.info('Google Drive Configuration:');
+      this.logger.info(`- Upload Enabled: ${googleDriveConfig.enableUpload}`);
+      this.logger.info(`- Credentials Path: ${googleDriveConfig.credentialsPath}`);
+      this.logger.info(`- Root Folder ID: ${googleDriveConfig.rootFolderId}`);
+      
+      // Check if credentials file exists
+      if (!fs.existsSync(googleDriveConfig.credentialsPath)) {
+        this.logger.error(`Google Drive credentials file not found at: ${googleDriveConfig.credentialsPath}`);
+        this.logger.info('Make sure you have placed your Service Account JSON file at this location');
+        return;
+      }
+      
+      // Check root folder ID
+      if (!googleDriveConfig.rootFolderId) {
+        this.logger.error('Google Drive root folder ID is empty');
+        this.logger.info('Set GOOGLE_DRIVE_ROOT_FOLDER_ID in your config/.env file');
+        return;
+      }
+      
+      // Validate folder ID format
+      const folderIdPattern = /^[a-zA-Z0-9_-]+$/;
+      if (!folderIdPattern.test(googleDriveConfig.rootFolderId)) {
+        this.logger.warn(`Root folder ID may be invalid: ${googleDriveConfig.rootFolderId}`);
+        this.logger.info('Folder ID should be a string of letters and numbers without slashes or special characters');
+      }
+      
+      this.logger.info('Initializing Google Drive uploader for testing...');
+      
+      // Initialize the Google Drive uploader
+      try {
+        this.googleDriveUploader = new GoogleDriveUploader(
+          googleDriveConfig.credentialsPath,
+          googleDriveConfig.rootFolderId
+        );
+        
+        // Run the debug access tests
+        await this.googleDriveUploader.debugFolderAccess();
+      } catch (error) {
+        this.logger.error('Google Drive initialization failed', error as Error);
+        
+        // Provide helpful advice
+        this.logger.info('\nTroubleshooting Steps:');
+        this.logger.info('1. Check that your credentials file contains valid JSON');
+        this.logger.info('2. Verify your folder ID is correct (copy from Google Drive URL)');
+        this.logger.info('3. Ensure the service account email has been added to the folder with Editor permission');
+        this.logger.info('4. Verify the Google Drive API is enabled in your Google Cloud project');
+      }
+    } catch (error) {
+      this.logger.error('Failed to debug Google Drive', error as Error);
+    }
+  }
+  
+  /**
    * Clean up resources
    */
   public async cleanup(): Promise<void> {
@@ -455,6 +525,9 @@ interface CliArgs {
   'upload-only'?: boolean;
   uploadOnly?: boolean;
   'u'?: boolean;
+  'debug-drive'?: boolean;
+  debugDrive?: boolean;
+  'd'?: boolean;
   'help'?: boolean;
   'h'?: boolean;
   'version'?: boolean;
@@ -480,6 +553,11 @@ async function main(): Promise<void> {
       type: 'boolean',
       description: 'Run in upload-only mode (upload existing images without scraping)'
     })
+    .option('debug-drive', {
+      alias: 'd',
+      type: 'boolean',
+      description: 'Test Google Drive configuration and permissions'
+    })
     .help()
     .alias('help', 'h')
     .version()
@@ -495,8 +573,17 @@ async function main(): Promise<void> {
   const scraper = new TwitterImageScraper();
   
   try {
-    const isScrapeOnly = argv['scrape-only'] || argv.scrapeOnly;
-    const isUploadOnly = argv['upload-only'] || argv.uploadOnly;
+    const isScrapeOnly = argv['scrape-only'] || argv.scrapeOnly || argv.s;
+    const isUploadOnly = argv['upload-only'] || argv.uploadOnly || argv.u;
+    const isDebugDrive = argv['debug-drive'] || argv.debugDrive || argv.d;
+    
+    // Debug mode takes precedence
+    if (isDebugDrive) {
+      console.log('Running in Google Drive debug mode...');
+      await scraper.debugGoogleDrive();
+      process.exit(0);
+      return;
+    }
     
     // Check for conflicting flags
     if (isScrapeOnly && isUploadOnly) {
