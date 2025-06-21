@@ -304,10 +304,10 @@ test.describe('Twitter Image Scraper', () => {
             const downloadResult = await twitterScraper.downloadImages(testImageData);
             
             // Verify download results
-            expect(downloadResult.total).toEqual(testImageData.length);
-            expect(downloadResult.successful + downloadResult.skipped).toBeGreaterThan(0);
+            expect(downloadResult.stats.total).toEqual(testImageData.length);
+            expect(downloadResult.stats.successful + downloadResult.stats.skipped).toBeGreaterThan(0);
             
-            logger.success(`Download test passed. Downloaded ${downloadResult.successful} new images, ${downloadResult.skipped} already existed`);
+            logger.success(`Download test passed. Downloaded ${downloadResult.stats.successful} new images, ${downloadResult.stats.skipped} already existed`);
             
             // Logout after successful test
             await twitterAuth.logout();
@@ -373,10 +373,10 @@ test.describe('Twitter Image Scraper', () => {
             const downloadResult = await twitterScraper.downloadImages(testImageData);
             
             // Verify download results
-            expect(downloadResult.total).toEqual(testImageData.length);
+            expect(downloadResult.stats.total).toEqual(testImageData.length);
             
             // Log download stats
-            logger.success(`E2E test completed successfully. Downloaded ${downloadResult.successful}/${downloadResult.total} images`);
+            logger.success(`E2E test completed successfully. Downloaded ${downloadResult.stats.successful}/${downloadResult.stats.total} images`);
             
             // Logout after successful test
             await twitterAuth.logout();

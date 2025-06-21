@@ -298,14 +298,20 @@ export class TwitterScraper extends BasePage {
    * @returns Object containing download statistics
    */
   public async downloadImages(imageDataList: ImageData[]): Promise<{
-    successful: number;
-    failed: number;
-    skipped: number;
-    total: number;
+    stats: {
+      successful: number;
+      failed: number;
+      skipped: number;
+      total: number;
+    };
+    downloadedPaths: string[];
   }> {
     if (imageDataList.length === 0) {
       this.logger.warn(`No images to download for ${this.currentUsername}`);
-      return { successful: 0, failed: 0, skipped: 0, total: 0 };
+      return { 
+        stats: { successful: 0, failed: 0, skipped: 0, total: 0 },
+        downloadedPaths: []
+      };
     }
     
     this.logger.info(`Starting download of ${imageDataList.length} images for ${this.currentUsername}`);
@@ -380,7 +386,10 @@ export class TwitterScraper extends BasePage {
       }
     }
     
-    return { successful, failed, skipped, total: imageDataList.length };
+    return { 
+      stats: { successful, failed, skipped, total: imageDataList.length },
+      downloadedPaths: this.downloadedImagePaths
+    };
   }
   
   /**
