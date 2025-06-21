@@ -97,7 +97,7 @@ test.describe('Twitter Image Scraper', () => {
             const twitterScraper = new TwitterScraper(page, context, browser, scraperConfig);
             
             // Navigate to artist profile
-            await twitterScraper.navigateToProfile(testArtist);
+            await twitterScraper.navigateToProfileMediaTab(testArtist);
             
             // Verify we're on the correct profile page
             const currentUrl = page.url();
@@ -136,7 +136,7 @@ test.describe('Twitter Image Scraper', () => {
             const twitterScraper = new TwitterScraper(page, context, browser, scraperConfig);
             
             // Navigate to artist profile
-            await twitterScraper.navigateToProfile(testArtist);
+            await twitterScraper.navigateToProfileMediaTab(testArtist);
             
             // Check if account is private
             const isPrivate = await twitterScraper.isPrivateAccount();
@@ -172,7 +172,7 @@ test.describe('Twitter Image Scraper', () => {
             const twitterScraper = new TwitterScraper(page, context, browser, scraperConfig);
             
             // Navigate to artist profile
-            await twitterScraper.navigateToProfile(testArtist);
+            await twitterScraper.navigateToProfileMediaTab(testArtist);
             
             // Check if account is suspended
             const isSuspended = await twitterScraper.isSuspendedAccount();
@@ -208,7 +208,7 @@ test.describe('Twitter Image Scraper', () => {
             const twitterScraper = new TwitterScraper(page, context, browser, scraperConfig);
             
             // Navigate to artist profile
-            await twitterScraper.navigateToProfile(testArtist);
+            await twitterScraper.navigateToProfileMediaTab(testArtist);
             
             // Check if account is private or suspended and skip test if it is
             if (await twitterScraper.isPrivateAccount()) {
@@ -275,7 +275,7 @@ test.describe('Twitter Image Scraper', () => {
             const twitterScraper = new TwitterScraper(page, context, browser, scraperConfig);
             
             // Navigate to artist profile
-            await twitterScraper.navigateToProfile(testArtist);
+            await twitterScraper.navigateToProfileMediaTab(testArtist);
             
             // Check if account is private or suspended and skip test if it is
             if (await twitterScraper.isPrivateAccount() || await twitterScraper.isSuspendedAccount()) {
@@ -341,7 +341,7 @@ test.describe('Twitter Image Scraper', () => {
             logger.info(`Processing artist: @${testArtist}`);
             
             // Navigate to artist profile
-            await twitterScraper.navigateToProfile(testArtist);
+            await twitterScraper.navigateToProfileMediaTab(testArtist);
             
             // Check if account is accessible
             if (await twitterScraper.isPrivateAccount() || await twitterScraper.isSuspendedAccount()) {

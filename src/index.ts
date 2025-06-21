@@ -100,7 +100,7 @@ class TwitterImageScraper {
           this.logger.info(`Processing artist: @${artist}`);
           
           // Navigate to artist profile
-          await twitterScraper.navigateToProfile(artist);
+          await twitterScraper.navigateToProfileMediaTab(artist);
           
           // Check if account is private or suspended
           if (await twitterScraper.isPrivateAccount()) {

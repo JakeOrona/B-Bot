@@ -40,6 +40,14 @@ export class TwitterAuth extends BasePage {
   private readonly logoutButton = this.page.getByTestId('AccountSwitcher_Logout_Button');
   private readonly confirmLogoutButton = this.page.getByTestId('confirmationSheetConfirm');
   
+  // Additional login verification locators
+  private readonly composeButton = this.page.getByTestId('FloatingActionButton');
+  private readonly notificationsTabLink = this.page.getByTestId('AppTabBar_Notifications_Link');
+  private readonly exploreTabLink = this.page.getByTestId('AppTabBar_Explore_Link');
+  private readonly loginForm = this.page.locator('form[data-testid="LoginForm_Login_Button"]').first();
+  private readonly signupButton = this.page.getByTestId('signup');
+  private readonly userProfileName = this.page.locator('[data-testid="User-Name"]');
+  
   /**
    * Login to Twitter with username and password
    * @param credentials Twitter login credentials
@@ -48,10 +56,14 @@ export class TwitterAuth extends BasePage {
     try {
       // First check if we can use saved cookies
       if (await this.loadCookies()) {
-        // Verify login was successful
+        this.logger.info('Cookies loaded, verifying login state...');
+        
+        // Verify login was successful with our improved multi-step verification
         if (await this.verifyLoggedIn()) {
           this.logger.success('Successfully logged in with saved cookies');
           return;
+        } else {
+          this.logger.warn('Cookie-based login verification failed, proceeding with full login');
         }
       }
       
@@ -92,7 +104,7 @@ export class TwitterAuth extends BasePage {
       this.logger.info('Loaded saved cookies');
       
       // Navigate to Twitter homepage to verify cookies
-      await this.navigateWithRetry('https://twitter.com/home');
+      await this.navigateWithRetry('https://x.com/home');
       
       return true;
     } catch (error) {
@@ -156,9 +168,15 @@ export class TwitterAuth extends BasePage {
     // Handle 2FA if needed
     await this.handle2FA();
     
-    // Verify successful login
+    // Verify successful login with improved multi-check verification
     if (!(await this.verifyLoggedIn())) {
-      throw new ScraperError('Login failed - unable to verify successful login', ScraperErrorType.AUTHENTICATION_ERROR);
+      // Take screenshot for debugging in case of failure
+      const screenshotPath = await this.takeScreenshot('login_failure');
+      
+      throw new ScraperError(
+        `Login failed - unable to verify successful login. Screenshot saved to ${screenshotPath}`,
+        ScraperErrorType.AUTHENTICATION_ERROR
+      );
     }
     
     this.logger.success('Successfully logged in to Twitter');
@@ -207,13 +225,93 @@ export class TwitterAuth extends BasePage {
   }
   
   /**
-   * Verify if successfully logged in
+   * Verify if successfully logged in using a multi-step verification strategy
+   * @returns Boolean indicating if user is successfully logged in
    */
   private async verifyLoggedIn(): Promise<boolean> {
     try {
-      // Check for elements that should be present after login
-      const isLoggedIn = await this.homeTabLink.isVisible();
-      return isLoggedIn;
+      this.logger.info('Verifying login status with multi-step checks...');
+      
+      // Step 1: Check multiple positive indicators (elements that should be present)
+      this.logger.info('Step 1: Checking positive indicators of logged-in state');
+      let positiveChecks = 0;
+      
+      // Create a list of verification promises with timeouts to avoid long waits
+      const verificationTimeoutMs = 3000;
+      
+      // Primary UI elements visible when logged in
+      const homeTabVisible = await this.isElementVisible(this.homeTabLink, verificationTimeoutMs);
+      if (homeTabVisible) positiveChecks++;
+      
+      const accountMenuVisible = await this.isElementVisible(this.accountMenuButton, verificationTimeoutMs);
+      if (accountMenuVisible) positiveChecks++;
+      
+      const composeButtonVisible = await this.isElementVisible(this.composeButton, verificationTimeoutMs);
+      if (composeButtonVisible) positiveChecks++;
+      
+      const notificationsTabVisible = await this.isElementVisible(this.notificationsTabLink, verificationTimeoutMs);
+      if (notificationsTabVisible) positiveChecks++;
+      
+      this.logger.info(`Positive indicators found: ${positiveChecks}/4`);
+      
+      // If we have enough positive indicators, we can be confident user is logged in
+      if (positiveChecks >= 2) {
+        this.logger.info('Login verified through primary indicators');
+        return true;
+      }
+      
+      // Step 2: Verify negative indicators (login elements should be absent)
+      this.logger.info('Step 2: Verifying absence of login elements');
+      
+      const loginFormVisible = await this.isElementVisible(this.loginForm, verificationTimeoutMs);
+      const signupButtonVisible = await this.isElementVisible(this.signupButton, verificationTimeoutMs);
+      
+      if (!loginFormVisible && !signupButtonVisible && positiveChecks > 0) {
+        this.logger.info('Login verified through absence of login UI and presence of at least one authenticated element');
+        return true;
+      }
+      
+      // Step 3: URL Verification
+      this.logger.info('Step 3: Verifying URL patterns');
+      const currentUrl = this.page.url();
+      
+      const isLoginPage = currentUrl.includes('/login') || currentUrl.includes('/signin');
+      const isAuthenticatedRoute = currentUrl.includes('/home') || 
+                                  currentUrl.includes('/notifications') || 
+                                  currentUrl.includes('/messages');
+      
+      if (isAuthenticatedRoute && !isLoginPage && positiveChecks > 0) {
+        this.logger.info('Login verified through URL pattern matching authenticated routes');
+        return true;
+      }
+      
+      // Step 4: Final verification attempt - check for personalized content
+      if (positiveChecks > 0 || isAuthenticatedRoute) {
+        const userProfileVisible = await this.isElementVisible(this.userProfileName, verificationTimeoutMs);
+        if (userProfileVisible) {
+          this.logger.info('Login verified through presence of user profile elements');
+          return true;
+        }
+      }
+      
+      this.logger.warn('Login verification failed - insufficient indicators of authenticated state');
+      return false;
+    } catch (error) {
+      this.logger.error('Error during login verification', error as Error);
+      return false;
+    }
+  }
+  
+  /**
+   * Helper method to check if an element is visible with a timeout
+   * @param locator The locator to check visibility for
+   * @param timeoutMs Maximum time to wait in milliseconds
+   * @returns Boolean indicating if the element is visible
+   */
+  private async isElementVisible(locator: any, timeoutMs: number = 3000): Promise<boolean> {
+    try {
+      await locator.waitFor({ state: 'visible', timeout: timeoutMs });
+      return true;
     } catch (error) {
       return false;
     }

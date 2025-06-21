@@ -44,21 +44,12 @@ export class TwitterScraper extends BasePage {
   private readonly suspendedAccountLocator = this.page.locator('span:has-text("Account suspended")');
   
   /**
-   * Get the media tab locator for a specific user
-   * @param username Twitter username
-   * @returns Locator for the media tab
-   */
-  private getMediaTabLocator(username: string) {
-    return this.page.locator(`a[href="/${username}/media"]`);
-  }
-  
-  /**
    * Navigate to a Twitter profile
    * @param username Twitter username to navigate to
    */
-  public async navigateToProfile(username: string): Promise<void> {
+  public async navigateToProfileMediaTab(username: string): Promise<void> {
     this.currentUsername = username;
-    const profileUrl = `https://x.com/${username}`;
+    const profileUrl = `https://x.com/${username}/media`;
     
     try {
       await this.navigateWithRetry(profileUrl, this.config.maxRetries, this.config.retryDelay);
@@ -70,12 +61,6 @@ export class TwitterScraper extends BasePage {
           ScraperErrorType.NAVIGATION_ERROR
         );
       }
-      
-      // Click on "Media" tab to show only media tweets
-      const mediaTabLocator = this.getMediaTabLocator(username);
-      await mediaTabLocator.waitFor({ state: 'visible' });
-      await mediaTabLocator.click();
-      await this.page.waitForLoadState('networkidle');
       
       this.logger.info(`Successfully navigated to ${username}'s media timeline`);
     } catch (error) {

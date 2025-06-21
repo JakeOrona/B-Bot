@@ -32,14 +32,14 @@ export abstract class BasePage {
    */
   protected async navigateWithRetry(
     url: string, 
-    maxRetries: number = 3, 
+    maxRetries: number = 1, 
     retryDelay: number = 2000
   ): Promise<void> {
     let attempts = 0;
     
     while (attempts < maxRetries) {
       try {
-        await this.page.goto(url, { waitUntil: 'networkidle' });
+        await this.page.goto(url, { timeout: 5000 });
         this.logger.info(`Successfully navigated to: ${url}`);
         return;
       } catch (error) {
