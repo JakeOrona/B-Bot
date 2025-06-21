@@ -36,15 +36,16 @@ export class TwitterScraper extends BasePage {
   private readonly emptyStateLocator = this.page.locator('div[data-testid="emptyState"]');
   
   // Media and tweet locators
-  private readonly tweetPhotoLocator = this.page.locator('[data-testid="tweetPhoto"]');
+  private readonly tweetPhotoLocator = this.page.locator('img[src*="pbs.twimg.com"]');
   private readonly tweetLocator = this.page.locator('article[data-testid="tweet"]');
+  private readonly cellDivLocator = this.page.locator('div[data-testid="cellInnerDiv"]');
   
   // Account status locators
   private readonly privateAccountLocator = this.page.locator('span:has-text("These posts are protected")');
   private readonly suspendedAccountLocator = this.page.locator('span:has-text("Account suspended")');
   
   /**
-   * Navigate to a Twitter profile
+   * Navigate to a Twitter profile's media tab
    * @param username Twitter username to navigate to
    */
   public async navigateToProfileMediaTab(username: string): Promise<void> {
@@ -61,6 +62,26 @@ export class TwitterScraper extends BasePage {
           ScraperErrorType.NAVIGATION_ERROR
         );
       }
+      
+      // Ensure we're on the media tab by clicking it if necessary
+      try {
+        const mediaTab = this.getMediaTabLocator(username);
+        if (await mediaTab.isVisible()) {
+          // Only click if it's not already selected (aria-selected attribute)
+          const isSelected = await mediaTab.getAttribute('aria-selected');
+          if (isSelected !== 'true') {
+            this.logger.info('Media tab exists but not selected, clicking it...');
+            await mediaTab.click();
+            await this.page.waitForLoadState('networkidle', { timeout: 5000 });
+          }
+        }
+      } catch (tabError) {
+        this.logger.warn(`Could not verify media tab: ${(tabError as Error).message}`);
+        // Continue anyway as we already navigated to the media URL directly
+      }
+      
+      // Wait a moment for any dynamic content to load
+      await this.wait(1000);
       
       this.logger.info(`Successfully navigated to ${username}'s media timeline`);
     } catch (error) {
@@ -111,9 +132,10 @@ export class TwitterScraper extends BasePage {
         }
       }
       
-      // Count the number of images found
+      // Count the number of images found using updated selector for Twitter media images
       const imageCount = await this.page.evaluate(() => {
-        const images = document.querySelectorAll('[data-testid="tweetPhoto"]');
+        const images = document.querySelectorAll('img[src*="pbs.twimg.com"]');
+        console.log(`Twitter media images found during scroll: ${images.length}`);
         return images.length;
       });
       
@@ -140,45 +162,103 @@ export class TwitterScraper extends BasePage {
       const imageData = await this.page.evaluate((username) => {
         const images: {url: string, tweetId: string, username: string, index: number}[] = [];
         
-        // Select all tweet containers with images
-        const tweets = document.querySelectorAll('article[data-testid="tweet"]');
+        // Debug: Log what we're finding
+        const allImages = document.querySelectorAll('img');
+        const twitterImages = document.querySelectorAll('img[src*="pbs.twimg.com"]');
+        console.log(`Total images found: ${allImages.length}`);
+        console.log(`Twitter media images found: ${twitterImages.length}`);
         
-        tweets.forEach((tweet) => {
-          // Get the tweet ID from the time element's link
-          const timeElement = tweet.querySelector('time');
-          if (!timeElement) return;
-          
-          const linkElement = timeElement.closest('a');
-          if (!linkElement) return;
-          
-          const href = linkElement.getAttribute('href');
-          if (!href) return;
-          
-          // Extract the tweet ID from the link href (e.g., /username/status/1234567890)
-          const match = href.match(/\/status\/(\d+)/);
-          if (!match) return;
-          
-          const tweetId = match[1];
-          
-          // Get all image elements in the tweet
-          const imageElements = tweet.querySelectorAll('[data-testid="tweetPhoto"] img');
-          
-          // Extract image URLs
-          Array.from(imageElements).forEach((img, index) => {
-            const src = img.getAttribute('src');
-            if (!src) return;
-            
-            // Get the largest version of the image by modifying the URL
-            // Twitter usually stores images with size parameters, we want to get the original size
-            const originalUrl = src.replace(/&name=\w+$/, '&name=orig');
-            
-            images.push({
-              url: originalUrl,
-              tweetId,
-              username,
-              index
+        // Try multiple selectors for tweet containers
+        const tweetSelectors = [
+            'article[data-testid="tweet"]',
+            '[data-testid="tweet"]', 
+            'div[data-testid="cellInnerDiv"]'
+        ];
+        
+        let tweets: Element[] = [];
+        for (const selector of tweetSelectors) {
+            const foundTweets = document.querySelectorAll(selector);
+            if (foundTweets.length > 0) {
+                tweets = Array.from(foundTweets);
+                console.log(`Found ${tweets.length} tweets using selector: ${selector}`);
+                break;
+            }
+        }
+        
+        if (tweets.length === 0) {
+            console.log('No tweet containers found. Falling back to direct image extraction.');
+            // If we can't find tweet containers, extract images directly
+            const directImages = document.querySelectorAll('img[src*="pbs.twimg.com"]');
+            Array.from(directImages).forEach((img, index) => {
+                const src = (img as Element).getAttribute('src');
+                if (!src) return;
+                
+                // Get the largest version of the image by modifying the URL
+                const originalUrl = src.replace(/[&?]name=\w+/, '&name=orig');
+                
+                images.push({
+                    url: originalUrl,
+                    tweetId: `unknown-${Date.now()}-${index}`, // Generate fallback ID
+                    username,
+                    index
+                });
             });
-          });
+            
+            return images;
+        }
+        
+        // Process each found tweet
+        Array.from(tweets).forEach((tweet, tweetIndex) => {
+            // Enhanced tweet ID extraction
+            let tweetId = null;
+            
+            // Look for multiple possible link patterns
+            const linkSelectors = [
+                'time a[href*="/status/"]',
+                'a[href*="/status/"]',
+                '[data-testid="Time"] a'
+            ];
+            
+            for (const selector of linkSelectors) {
+                const linkElement = tweet.querySelector(selector);
+                if (linkElement) {
+                    const href = linkElement.getAttribute('href');
+                    const match = href?.match(/\/status\/(\d+)/);
+                    if (match) {
+                        tweetId = match[1];
+                        break;
+                    }
+                }
+            }
+            
+            // If we still couldn't find a tweet ID, generate a fallback
+            if (!tweetId) {
+                tweetId = `tweet-${tweetIndex}-${Date.now()}`;
+            }
+            
+            // Get all image elements in the tweet using improved selector
+            const imageElements = tweet.querySelectorAll('img[src*="pbs.twimg.com"]');
+            
+            if (imageElements.length === 0) {
+                console.log(`No images found in tweet ${tweetId} using improved selector`);
+            }
+            
+            // Extract image URLs
+            Array.from(imageElements).forEach((img, index) => {
+                const src = (img as Element).getAttribute('src');
+                if (!src) return;
+                
+                // Get the largest version of the image by modifying the URL
+                // Handle both formats: ?name=small and &name=small
+                const originalUrl = src.replace(/[&?]name=\w+/, '&name=orig');
+                
+                images.push({
+                    url: originalUrl,
+                    tweetId,
+                    username,
+                    index
+                });
+            });
         });
         
         return images;
@@ -212,6 +292,12 @@ export class TwitterScraper extends BasePage {
     }
     
     this.logger.info(`Starting download of ${imageDataList.length} images for ${this.currentUsername}`);
+    
+    // Log sample of found image URLs for debugging
+    if (imageDataList.length > 0) {
+      const sampleUrl = imageDataList[0].url;
+      this.logger.info(`Sample image URL: ${sampleUrl}`);
+    }
     
     // Create user-specific directory if it doesn't exist
     const userDir = path.join(this.config.downloadPath, this.currentUsername);
@@ -290,5 +376,26 @@ export class TwitterScraper extends BasePage {
       this.logger.warn(`Account @${this.currentUsername} is suspended`);
     }
     return isSuspended;
+  }
+  
+  /**
+   * Get media tab locator for a specific user
+   * @param username Twitter username
+   * @returns Locator for the media tab
+   */
+  private getMediaTabLocator(username: string) {
+    return this.page.locator(`a[href="/${username}/media"]`);
+  }
+  
+  /**
+   * Helper method to find tweet containers using multiple selectors
+   * @returns A locator that matches tweet containers
+   */
+  private getTweetContainerLocator(): any {
+    return [
+      this.tweetLocator,
+      this.cellDivLocator,
+      this.page.locator('[data-testid*="tweet"]')
+    ];
   }
 }
