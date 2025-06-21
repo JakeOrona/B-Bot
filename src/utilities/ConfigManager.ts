@@ -111,7 +111,9 @@ export class ConfigManager {
       maxScrolls: parseInt(process.env.MAX_SCROLLS || '10', 10),
       rateLimitDelay: parseInt(process.env.RATE_LIMIT_DELAY || '2000', 10),
       maxRetries: parseInt(process.env.MAX_RETRIES || '3', 10),
-      retryDelay: parseInt(process.env.RETRY_DELAY || '5000', 10)
+      retryDelay: parseInt(process.env.RETRY_DELAY || '5000', 10),
+      uploadBatchSize: parseInt(process.env.UPLOAD_BATCH_SIZE || '10', 10),
+      maxConcurrentUploads: parseInt(process.env.MAX_CONCURRENT_UPLOADS || '3', 10)
     };
   }
   
@@ -150,6 +152,9 @@ export class ConfigManager {
         'RATE_LIMIT_DELAY=2000\n' +
         'MAX_RETRIES=3\n' +
         'RETRY_DELAY=5000\n\n' +
+        '# Upload Configuration\n' +
+        'UPLOAD_BATCH_SIZE=10\n' +
+        'MAX_CONCURRENT_UPLOADS=3\n\n' +
         '# Google Drive Configuration\n' +
         'GOOGLE_DRIVE_ENABLED=false\n' +
         'GOOGLE_DRIVE_CREDENTIALS_PATH=config/google-service-account.json\n' +

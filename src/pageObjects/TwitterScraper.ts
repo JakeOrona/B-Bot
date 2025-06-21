@@ -4,7 +4,13 @@
 
 import { Browser, BrowserContext, Page } from 'playwright';
 import { BasePage } from './BasePage';
-import { ImageData, ScraperConfig, ScraperError, ScraperErrorType } from '../interfaces/ScraperTypes';
+import { 
+  ImageData, 
+  ScraperConfig, 
+  ScraperError, 
+  ScraperErrorType, 
+  UploadResult 
+} from '../interfaces/ScraperTypes';
 import { ImageDownloader } from '../utilities/ImageDownloader';
 import { GoogleDriveUploader } from '../utilities/GoogleDriveUploader';
 import { FileCleanup } from '../utilities/FileCleanup';
@@ -292,10 +298,9 @@ export class TwitterScraper extends BasePage {
   }
   
   /**
-   * Download extracted images
+   * Download extracted images with concurrent batch uploading
    * @param imageDataList Array of image data to download
-   * @param username Twitter username
-   * @returns Object containing download statistics
+   * @returns Object containing download statistics and upload results
    */
   public async downloadImages(imageDataList: ImageData[]): Promise<{
     stats: {
@@ -305,6 +310,8 @@ export class TwitterScraper extends BasePage {
       total: number;
     };
     downloadedPaths: string[];
+    uploadResults?: UploadResult[];
+    totalUploadStats?: UploadResult;
   }> {
     if (imageDataList.length === 0) {
       this.logger.warn(`No images to download for ${this.currentUsername}`);
@@ -331,65 +338,71 @@ export class TwitterScraper extends BasePage {
     // Reset the downloaded paths array for this batch
     this.downloadedImagePaths = [];
     
-    // Download each image with rate limiting
-    let successful = 0;
-    let failed = 0;
-    let skipped = 0;
+    // Check if Google Drive upload is enabled
+    const isUploadEnabled = this.config.googleDrive?.enableUpload && this.googleDriveUploader;
     
-    for (let i = 0; i < imageDataList.length; i++) {
-      const imageData = imageDataList[i];
+    if (isUploadEnabled) {
+      // Use concurrent download and upload approach
+      const result = await this.downloadWithConcurrentUpload(imageDataList);
+      this.downloadedImagePaths = result.downloadedPaths;
       
-      try {
-        // Download the image and get the local path
-        const localPath = await this.imageDownloader.downloadImage(imageData);
-        successful++;
+      return { 
+        stats: result.stats, 
+        downloadedPaths: result.downloadedPaths,
+        uploadResults: result.uploadResults,
+        totalUploadStats: result.totalUploadStats
+      };
+    } else {
+      // Fallback to sequential download-only approach if uploads are disabled
+      
+      // Download each image with rate limiting
+      let successful = 0;
+      let failed = 0;
+      let skipped = 0;
+      
+      for (let i = 0; i < imageDataList.length; i++) {
+        const imageData = imageDataList[i];
         
-        // Track downloaded path for later batch upload
-        if (localPath) {
-          this.downloadedImagePaths.push(localPath);
+        try {
+          // Download the image and get the local path
+          const localPath = await this.imageDownloader.downloadImage(imageData);
+          successful++;
+          
+          // Track downloaded path for later batch upload
+          if (localPath) {
+            this.downloadedImagePaths.push(localPath);
+          }
+          
+          // Log progress periodically
+          if (successful % 10 === 0 || successful === imageDataList.length) {
+            this.logger.info(`Downloaded ${successful}/${imageDataList.length} images for ${this.currentUsername}`);
+          }
+        } catch (error) {
+          if ((error as ScraperError).type === ScraperErrorType.DOWNLOAD_ERROR) {
+            failed++;
+            this.logger.error(`Failed to download image ${i + 1}/${imageDataList.length}`, error as Error);
+          } else {
+            // If it was skipped due to existing file
+            skipped++;
+          }
         }
         
-        // Log progress periodically
-        if (successful % 10 === 0 || successful === imageDataList.length) {
-          this.logger.info(`Downloaded ${successful}/${imageDataList.length} images for ${this.currentUsername}`);
-        }
-      } catch (error) {
-        if ((error as ScraperError).type === ScraperErrorType.DOWNLOAD_ERROR) {
-          failed++;
-          this.logger.error(`Failed to download image ${i + 1}/${imageDataList.length}`, error as Error);
-        } else {
-          // If it was skipped due to existing file
-          skipped++;
+        // Apply rate limiting delay between downloads
+        if (i < imageDataList.length - 1) {
+          await this.wait(this.config.rateLimitDelay);
         }
       }
       
-      // Apply rate limiting delay between downloads
-      if (i < imageDataList.length - 1) {
-        await this.wait(this.config.rateLimitDelay);
-      }
+      this.logger.success(
+        `Completed downloading images for ${this.currentUsername}: ` +
+        `${successful} successful, ${failed} failed, ${skipped} skipped`
+      );
+      
+      return { 
+        stats: { successful, failed, skipped, total: imageDataList.length },
+        downloadedPaths: this.downloadedImagePaths
+      };
     }
-    
-    this.logger.success(
-      `Completed downloading images for ${this.currentUsername}: ` +
-      `${successful} successful, ${failed} failed, ${skipped} skipped`
-    );
-    
-    // Upload to Google Drive if enabled
-    if (this.config.googleDrive?.enableUpload && this.googleDriveUploader && this.downloadedImagePaths.length > 0) {
-      this.logger.info(`Starting batch upload of ${this.downloadedImagePaths.length} images to Google Drive`);
-      try {
-        const uploadResult = await this.googleDriveUploader.batchUpload(this.downloadedImagePaths, this.currentUsername);
-        this.logger.success(`Google Drive upload completed: ${uploadResult.successful}/${uploadResult.total} successful`);
-      } catch (error) {
-        this.logger.error('Google Drive upload failed', error as Error);
-        // Continue execution - upload failure shouldn't halt the scraping process
-      }
-    }
-    
-    return { 
-      stats: { successful, failed, skipped, total: imageDataList.length },
-      downloadedPaths: this.downloadedImagePaths
-    };
   }
   
   /**
@@ -457,5 +470,223 @@ export class TwitterScraper extends BasePage {
       this.logger.error('File cleanup failed', error as Error);
       // Continue execution - cleanup failure shouldn't halt the scraping process
     }
+  }
+  
+  /**
+   * Upload a batch of images asynchronously
+   * @param filePaths Array of file paths to upload
+   * @param batchNumber The batch number for logging purposes
+   * @returns Promise resolving to upload result statistics
+   */
+  private async uploadBatchAsync(
+    filePaths: string[], 
+    batchNumber: number
+  ): Promise<UploadResult> {
+    try {
+      if (!this.googleDriveUploader || filePaths.length === 0) {
+        return { successful: 0, failed: 0, skipped: 0, total: 0 };
+      }
+      
+      this.logger.info(`Starting async upload of batch ${batchNumber} (${filePaths.length} files) for ${this.currentUsername}`);
+      const result = await this.googleDriveUploader.batchUpload(filePaths, this.currentUsername);
+      this.logger.success(
+        `Batch ${batchNumber} upload completed for ${this.currentUsername}: ` +
+        `${result.successful}/${result.total} successful, ${result.failed} failed, ${result.skipped} skipped`
+      );
+      return result;
+    } catch (error) {
+      this.logger.error(`Batch ${batchNumber} upload failed`, error as Error);
+      return { 
+        successful: 0, 
+        failed: filePaths.length, 
+        skipped: 0, 
+        total: filePaths.length 
+      };
+    }
+  }
+  
+  /**
+   * Combine multiple upload results into a single aggregated result
+   * @param results Array of upload results
+   * @returns Combined upload statistics
+   */
+  private combineUploadResults(results: UploadResult[]): UploadResult {
+    return results.reduce(
+      (acc, curr) => ({
+        successful: acc.successful + curr.successful,
+        failed: acc.failed + curr.failed,
+        skipped: acc.skipped + curr.skipped,
+        total: acc.total + curr.total
+      }),
+      { successful: 0, failed: 0, skipped: 0, total: 0 }
+    );
+  }
+  
+  /**
+   * Download images with concurrent batch uploading
+   * @param imageDataList Array of image data to download
+   * @returns Statistics and results of download and upload operations
+   */
+  private async downloadWithConcurrentUpload(
+    imageDataList: ImageData[]
+  ): Promise<{
+    stats: {
+      successful: number;
+      failed: number;
+      skipped: number;
+      total: number;
+    };
+    downloadedPaths: string[];
+    uploadResults: UploadResult[];
+    totalUploadStats: UploadResult;
+  }> {
+    if (imageDataList.length === 0) {
+      return { 
+        stats: { successful: 0, failed: 0, skipped: 0, total: 0 },
+        downloadedPaths: [],
+        uploadResults: [],
+        totalUploadStats: { successful: 0, failed: 0, skipped: 0, total: 0 }
+      };
+    }
+    
+    // Get batch configuration from settings
+    const UPLOAD_BATCH_SIZE = this.config.uploadBatchSize || 10;
+    const MAX_CONCURRENT_UPLOADS = this.config.maxConcurrentUploads || 3;
+    
+    // Set up tracking variables
+    let downloadedBatch: string[] = [];
+    const allDownloadedPaths: string[] = [];
+    const uploadPromises: Promise<UploadResult>[] = [];
+    const uploadResults: UploadResult[] = [];
+    const uploadQueue: { paths: string[], batchNumber: number }[] = [];
+    let activeUploads = 0;
+    let batchCounter = 1;
+    
+    // Track download stats
+    let successful = 0;
+    let failed = 0;
+    let skipped = 0;
+    let totalUploaded = 0;
+    
+    // Process queue function to manage concurrent uploads
+    const processQueue = async () => {
+      // While we have capacity and items in the queue
+      while (activeUploads < MAX_CONCURRENT_UPLOADS && uploadQueue.length > 0) {
+        const batch = uploadQueue.shift()!;
+        activeUploads++;
+        
+        // Start the upload and add to promises array
+        uploadPromises.push(
+          this.uploadBatchAsync(batch.paths, batch.batchNumber)
+            .then(result => {
+              // Process completed upload
+              uploadResults.push(result);
+              totalUploaded += result.successful;
+              
+              // Log overall progress
+              this.logger.info(
+                `Progress: ${successful}/${imageDataList.length} downloaded, ` +
+                `${totalUploaded} uploaded across ${uploadResults.length} completed batches`
+              );
+              
+              // Decrease active count and process next in queue
+              activeUploads--;
+              return processQueue().then(() => result);
+            })
+        );
+      }
+    };
+    
+    // Download each image with rate limiting
+    for (let i = 0; i < imageDataList.length; i++) {
+      const imageData = imageDataList[i];
+      
+      try {
+        // Download the image and get the local path
+        const localPath = await this.imageDownloader.downloadImage(imageData);
+        successful++;
+        
+        // Track downloaded path
+        if (localPath) {
+          downloadedBatch.push(localPath);
+          allDownloadedPaths.push(localPath);
+        }
+        
+        // When we reach the batch size or the end, queue up an upload
+        if (downloadedBatch.length >= UPLOAD_BATCH_SIZE || i === imageDataList.length - 1) {
+          // Only process if we have files to upload and Google Drive is enabled
+          if (downloadedBatch.length > 0 && this.googleDriveUploader) {
+            // Create a copy of the current batch
+            const currentBatch = [...downloadedBatch];
+            
+            // Add to the upload queue
+            uploadQueue.push({
+              paths: currentBatch,
+              batchNumber: batchCounter++
+            });
+            
+            // Process the queue (will start uploads if we have capacity)
+            await processQueue();
+            
+            // Reset the batch
+            downloadedBatch = [];
+          }
+        }
+        
+        // Log download progress periodically
+        if (successful % 10 === 0 || successful === imageDataList.length) {
+          this.logger.info(
+            `Downloaded ${successful}/${imageDataList.length} images for ${this.currentUsername} ` +
+            `(${uploadResults.length} batches uploaded, ${uploadQueue.length} pending, ${activeUploads} active)`
+          );
+        }
+      } catch (error) {
+        if ((error as ScraperError).type === ScraperErrorType.DOWNLOAD_ERROR) {
+          failed++;
+          this.logger.error(`Failed to download image ${i + 1}/${imageDataList.length}`, error as Error);
+        } else {
+          // If it was skipped due to existing file
+          skipped++;
+        }
+      }
+      
+      // Apply rate limiting delay between downloads
+      if (i < imageDataList.length - 1) {
+        await this.wait(this.config.rateLimitDelay);
+      }
+    }
+    
+    // Handle any remaining batches in the queue
+    while (uploadQueue.length > 0 || activeUploads > 0) {
+      await processQueue();
+      
+      // Small delay to prevent tight looping
+      if (activeUploads > 0) {
+        await this.wait(500);
+      }
+    }
+    
+    // Wait for all upload operations to complete
+    await Promise.allSettled(uploadPromises);
+    
+    // Combine all upload results
+    const totalUploadStats = this.combineUploadResults(uploadResults);
+    
+    this.logger.success(
+      `Completed downloading images for ${this.currentUsername}: ` +
+      `${successful} downloaded successfully, ${failed} download failures, ${skipped} skipped`
+    );
+    
+    this.logger.success(
+      `All uploads completed for ${this.currentUsername}: ` +
+      `${totalUploadStats.successful} uploaded successfully, ${totalUploadStats.failed} upload failures, ${totalUploadStats.skipped} skipped`
+    );
+    
+    return { 
+      stats: { successful, failed, skipped, total: imageDataList.length },
+      downloadedPaths: allDownloadedPaths,
+      uploadResults,
+      totalUploadStats
+    };
   }
 }

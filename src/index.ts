@@ -152,11 +152,11 @@ class TwitterImageScraper {
             continue;
           }
           
-          // Download images
+          // Download images with concurrent uploads
           const downloadResult = await twitterScraper.downloadImages(imageDataList);
           
-          // Upload to Google Drive if enabled
-          if (this.googleDriveUploader && downloadResult.downloadedPaths.length > 0) {
+          // If we're using the old upload flow (not concurrent)
+          if (this.googleDriveUploader && downloadResult.downloadedPaths.length > 0 && !downloadResult.totalUploadStats) {
             try {
               this.logger.info(`Starting batch upload of ${downloadResult.downloadedPaths.length} images for @${artist}`);
               const uploadResult = await this.googleDriveUploader.batchUpload(downloadResult.downloadedPaths, artist);
@@ -165,6 +165,12 @@ class TwitterImageScraper {
               this.logger.error(`Upload failed for @${artist}`, error as Error);
               // Continue processing next artist even if upload fails
             }
+          } else if (downloadResult.totalUploadStats) {
+            // Concurrent uploads completed, just log the final stats
+            this.logger.success(
+              `Processing completed for @${artist}: Downloaded ${downloadResult.stats.successful}/${downloadResult.stats.total} images, ` +
+              `Uploaded ${downloadResult.totalUploadStats.successful}/${downloadResult.totalUploadStats.total} images to Google Drive`
+            );
           }
           
           // Add a delay between processing artists

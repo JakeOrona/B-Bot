@@ -30,6 +30,8 @@ export interface ScraperConfig {
   rateLimitDelay: number;
   maxRetries: number;
   retryDelay: number;
+  uploadBatchSize?: number; // Default: 10
+  maxConcurrentUploads?: number; // Default: 3
   googleDrive?: GoogleDriveConfig;
 }
 
