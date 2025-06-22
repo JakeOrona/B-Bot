@@ -9,6 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 import { AuthCredentials, ScraperConfig, ScraperError, ScraperErrorType } from '../interfaces/ScraperTypes';
+import { ProgressConfig } from './ProgressLogger';
 
 export class ConfigManager {
   private static instance: ConfigManager;
@@ -155,6 +156,10 @@ export class ConfigManager {
         '# Upload Configuration\n' +
         'UPLOAD_BATCH_SIZE=10\n' +
         'MAX_CONCURRENT_UPLOADS=3\n\n' +
+        '# Logging Configuration\n' +
+        'LOG_MODE=concise\n' +      // 'concise' | 'verbose'
+        'SHOW_PROGRESS_BARS=true\n' +
+        'LOG_TO_FILE=true\n\n' +
         '# Google Drive Configuration\n' +
         'GOOGLE_DRIVE_ENABLED=false\n' +
         'GOOGLE_DRIVE_CREDENTIALS_PATH=config/google-service-account.json\n' +
@@ -173,6 +178,18 @@ export class ConfigManager {
         enableUpload: process.env.GOOGLE_DRIVE_ENABLED === 'true',
         credentialsPath: path.join(process.cwd(), process.env.GOOGLE_DRIVE_CREDENTIALS_PATH || 'config/google-service-account.json'),
         rootFolderId: process.env.GOOGLE_DRIVE_ROOT_FOLDER_ID || ''
+    };
+  }
+
+  /**
+   * Get progress logger configuration from environment variables
+   * @returns Progress logger configuration
+   */
+  public getProgressConfig(): ProgressConfig {
+    return {
+      logMode: (process.env.LOG_MODE as 'concise' | 'verbose') || 'concise',
+      showProgressBars: process.env.SHOW_PROGRESS_BARS !== 'false',
+      logToFile: process.env.LOG_TO_FILE !== 'false'
     };
   }
 }

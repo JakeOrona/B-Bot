@@ -10,6 +10,10 @@ A TypeScript application using Playwright to authenticate with X/Twitter, naviga
 - **Robust Error Handling**: Implements retry logic and gracefully handles various edge cases
 - **Rate Limiting**: Respects Twitter's rate limits to avoid being blocked
 - **Configurable**: Easy configuration through environment variables and config files
+- **Progress Logger**: Dual-mode logging system with progress bars for visual feedback
+  - Concise mode with real-time progress bars for downloads and uploads
+  - Verbose mode with detailed logs for debugging
+  - All logs saved to files regardless of display mode
 
 ## Project Structure
 
@@ -95,6 +99,11 @@ MAX_SCROLLS=10
 RATE_LIMIT_DELAY=2000
 MAX_RETRIES=3
 RETRY_DELAY=5000
+
+# Logging Configuration
+LOG_MODE=concise           # 'concise' or 'verbose'
+SHOW_PROGRESS_BARS=true    # Whether to show progress bars
+LOG_TO_FILE=true           # Whether to save logs to files
 ```
 
 Add Twitter usernames (one per line) to `config/artists.txt`:
@@ -104,6 +113,21 @@ artist1
 artist2
 artist3
 ```
+
+### Logging Modes
+
+- **Concise Mode** (default): Shows progress bars for downloads and uploads with minimal text output
+- **Verbose Mode**: Shows detailed log messages for each action without progress bars
+
+You can test different logging configurations without modifying your `.env` file by using:
+
+```bash
+node test-logger.js --verbose   # Test verbose mode
+node test-logger.js --concise   # Test concise mode (default)
+node test-logger.js --help      # Show all options
+```
+
+For more information about the advanced logging system, see [ADVANCED_LOGGING.md](docs/ADVANCED_LOGGING.md)
 
 ## How It Works
 

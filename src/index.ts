@@ -7,6 +7,7 @@ import { TwitterAuth } from './pageObjects/TwitterAuth';
 import { TwitterScraper } from './pageObjects/TwitterScraper';
 import { ConfigManager } from './utilities/ConfigManager';
 import { Logger } from './utilities/Logger';
+import { ProgressLogger } from './utilities/ProgressLogger';
 import { GoogleDriveUploader } from './utilities/GoogleDriveUploader';
 import { FileCleanup } from './utilities/FileCleanup';
 import { ScraperError, ScraperErrorType } from './interfaces/ScraperTypes';
@@ -14,6 +15,7 @@ import path from 'path';
 import fs from 'fs';
 import yargs from 'yargs';
 import { hideBin } from 'yargs/helpers';
+import colors from 'colors';
 
 /**
  * Main class for the scraper application
@@ -24,6 +26,7 @@ class TwitterImageScraper {
   private page: Page | null = null;
   private configManager: ConfigManager;
   private logger: Logger;
+  private progressLogger!: ProgressLogger;  // Initialized in initialize method
   private googleDriveUploader: GoogleDriveUploader | null = null;
   
   /**
@@ -32,6 +35,8 @@ class TwitterImageScraper {
   constructor() {
     this.configManager = ConfigManager.getInstance();
     this.logger = Logger.getInstance();
+    // We'll initialize the progressLogger in the initialize method
+    // after loading the configuration
   }
   
   /**
@@ -45,15 +50,25 @@ class TwitterImageScraper {
       // Get scraper configuration
       const config = this.configManager.getScraperConfig();
       
+      // Initialize progress logger
+      const progressConfig = this.configManager.getProgressConfig();
+      this.progressLogger = ProgressLogger.getInstance(progressConfig);
+      
       // Add Google Drive configuration if enabled
       const googleDriveConfig = this.configManager.getGoogleDriveConfig();
       if (googleDriveConfig.enableUpload) {
         config.googleDrive = googleDriveConfig;
-        this.logger.info('Google Drive integration enabled');
+        this.progressLogger.info('Google Drive integration enabled');
       }
       
-      this.logger.info('Starting Twitter/X Image Scraper');
-      this.logger.info(`Headless mode: ${config.headless ? 'enabled' : 'disabled'}`);
+      // Show initialization message based on log mode
+      if (progressConfig.logMode === 'concise') {
+        console.log(colors.cyan('Twitter Image Scraper Started\n'));
+      } else {
+        this.progressLogger.info('Starting Twitter/X Image Scraper');
+      }
+      
+      this.progressLogger.info(`Headless mode: ${config.headless ? 'enabled' : 'disabled'}`);
       
       // Launch browser
       this.browser = await chromium.launch({
@@ -77,16 +92,16 @@ class TwitterImageScraper {
             googleDriveConfig.credentialsPath,
             googleDriveConfig.rootFolderId
           );
-          this.logger.info('Google Drive uploader initialized');
+          this.progressLogger.info('Google Drive uploader initialized');
         } catch (error) {
-          this.logger.error('Failed to initialize Google Drive uploader', error as Error);
+          this.progressLogger.error('Failed to initialize Google Drive uploader', error as Error);
           // Continue without Google Drive upload capability
         }
       }
       
-      this.logger.info('Browser initialized successfully');
+      this.progressLogger.info('Browser initialized successfully');
     } catch (error) {
-      this.logger.error('Failed to initialize scraper', error as Error);
+      this.progressLogger.error('Failed to initialize scraper', error as Error);
       throw error;
     }
   }

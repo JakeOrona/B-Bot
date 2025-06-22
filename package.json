@@ -17,7 +17,8 @@
     "test:ui": "npx playwright test --ui",
     "test:debug": "npx playwright test --debug",
     "test:headed": "npx playwright test --headed",
-    "dev": "ts-node-dev --respawn src/index.ts"
+    "dev": "ts-node-dev --respawn src/index.ts",
+    "demo:logger": "ts-node src/demo/progressLoggerDemo.ts"
   },
   "keywords": [],
   "author": "",
@@ -26,6 +27,8 @@
   "dependencies": {
     "@types/node": "^24.0.3",
     "@types/yargs": "^17.0.33",
+    "cli-progress": "^3.12.0",
+    "colors": "^1.4.0",
     "dotenv": "^16.5.0",
     "googleapis": "^150.0.1",
     "playwright": "^1.53.1",
@@ -35,6 +38,7 @@
   },
   "devDependencies": {
     "@playwright/test": "^1.53.1",
+    "@types/cli-progress": "^3.11.6",
     "ts-node-dev": "^2.0.0"
   }
 }

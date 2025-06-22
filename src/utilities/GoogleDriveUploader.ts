@@ -7,6 +7,7 @@ import { google, drive_v3 } from 'googleapis';
 import fs from 'fs';
 import path from 'path';
 import { Logger } from './Logger';
+import { ProgressLogger } from './ProgressLogger';
 import { UploadResult } from '../interfaces/ScraperTypes';
 
 export class GoogleDriveUploader {
@@ -14,6 +15,7 @@ export class GoogleDriveUploader {
     private rootFolderId: string;
     private uploadStats: UploadResult;
     private logger: Logger;
+    private progressLogger: ProgressLogger;
     
     /**
      * Constructor for GoogleDriveUploader
@@ -26,6 +28,7 @@ export class GoogleDriveUploader {
         }
         
         this.logger = Logger.getInstance();
+        this.progressLogger = ProgressLogger.getInstance();
         this.rootFolderId = rootFolderId;
         this.uploadStats = { successful: 0, failed: 0, skipped: 0, total: 0 };
         
@@ -144,7 +147,7 @@ export class GoogleDriveUploader {
      * @param username Twitter username for folder structure
      * @returns Upload statistics
      */
-    public async batchUpload(localPaths: string[], username: string): Promise<UploadResult> {
+    public async batchUpload(localPaths: string[], username: string, progressId?: string): Promise<UploadResult> {
         if (localPaths.length === 0) {
             this.logger.info('No files to upload to Google Drive');
             return { successful: 0, failed: 0, skipped: 0, total: 0 };
@@ -155,10 +158,24 @@ export class GoogleDriveUploader {
         try {
             // Create or find the folder structure
             const destinationFolderId = await this.ensureFolderStructure(username);
-            this.logger.info(`Uploading ${localPaths.length} files to Google Drive folder for ${username}`);
+            this.progressLogger.info(`Uploading ${localPaths.length} files to Google Drive folder for ${username}`);
+            
+            // Create local progress bar if not provided from outside
+            const useLocalProgress = !progressId && localPaths.length > 1;
+            const localProgressId = useLocalProgress ? `drive-upload-${username}-${Date.now()}` : null;
+            
+            if (useLocalProgress && localProgressId) {
+                this.progressLogger.createProgressBar(
+                    localProgressId,
+                    localPaths.length,
+                    'Uploading',
+                    username
+                );
+            }
             
             // Process each file
-            for (const localPath of localPaths) {
+            for (let i = 0; i < localPaths.length; i++) {
+                const localPath = localPaths[i];
                 const fileName = path.basename(localPath);
                 try {
                     // Check if the file already exists
@@ -166,37 +183,66 @@ export class GoogleDriveUploader {
                     
                     if (isDuplicate) {
                         this.uploadStats.skipped++;
-                        this.logger.info(`Skipped duplicate file: ${fileName}`);
+                        this.progressLogger.info(`Skipped duplicate file: ${fileName}`);
                     } else {
                         // Upload the file
                         const success = await this.uploadSingleFile(localPath, fileName, destinationFolderId);
                         
                         if (success) {
                             this.uploadStats.successful++;
+                            // Update progress bar
+                            const completed = this.uploadStats.successful + this.uploadStats.skipped + this.uploadStats.failed;
+                            
+                            if (progressId) {
+                                this.progressLogger.updateProgress(progressId, completed);
+                            }
+                            
+                            if (useLocalProgress && localProgressId) {
+                                this.progressLogger.updateProgress(localProgressId, completed);
+                            }
+                            
                             // Log progress periodically
                             if (this.uploadStats.successful % 10 === 0 || 
-                                this.uploadStats.successful + this.uploadStats.skipped + this.uploadStats.failed === this.uploadStats.total) {
-                                this.logger.info(`Uploaded ${this.uploadStats.successful}/${this.uploadStats.total} files to Google Drive`);
+                                completed === this.uploadStats.total) {
+                                if (progressId || (useLocalProgress && localProgressId)) {
+                                    this.progressLogger.info(
+                                        `Uploaded ${this.uploadStats.successful}/${this.uploadStats.total} files to Google Drive`,
+                                        progressId || (localProgressId as string),
+                                        completed
+                                    );
+                                } else {
+                                    this.progressLogger.info(
+                                        `Uploaded ${this.uploadStats.successful}/${this.uploadStats.total} files to Google Drive`
+                                    );
+                                }
                             }
                         } else {
                             this.uploadStats.failed++;
-                            this.logger.error(`Failed to upload: ${fileName}`);
+                            this.progressLogger.error(`Failed to upload: ${fileName}`);
                         }
                     }
                 } catch (fileError) {
                     this.uploadStats.failed++;
-                    this.logger.error(`Error processing ${fileName}`, fileError as Error);
+                    this.progressLogger.error(`Error processing ${fileName}`, fileError as Error);
                 }
             }
             
-            this.logger.success(
+            // Complete local progress bar if we created one
+            if (useLocalProgress && localProgressId) {
+                this.progressLogger.completeProgress(
+                    localProgressId,
+                    `Uploaded ${this.uploadStats.successful}/${this.uploadStats.total} files for ${username}`
+                );
+            }
+            
+            this.progressLogger.success(
                 `Google Drive upload completed: ${this.uploadStats.successful} successful, ` +
                 `${this.uploadStats.skipped} skipped, ${this.uploadStats.failed} failed`
             );
             
             return this.uploadStats;
         } catch (error) {
-            this.logger.error('Batch upload failed', error as Error);
+            this.progressLogger.error('Batch upload failed', error as Error);
             // If the main process fails, return current stats
             return this.uploadStats;
         }
