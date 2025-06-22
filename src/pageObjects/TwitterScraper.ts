@@ -21,11 +21,12 @@ import path from 'path';
 
 export class TwitterScraper extends BasePage {
   private config: ScraperConfig;
-  private imageDownloader: ImageDownloader;
+  private imageDownloader!: ImageDownloader; // Will be initialized in constructor if not in extraction-only mode
   private googleDriveUploader?: GoogleDriveUploader;
   private currentUsername: string = '';
   private downloadedImagePaths: string[] = [];
   private progressLogger: ProgressLogger;
+  private extractionOnlyMode: boolean = false;
   
   /**
    * Constructor for TwitterScraper
@@ -33,28 +34,35 @@ export class TwitterScraper extends BasePage {
    * @param context Playwright BrowserContext instance
    * @param browser Playwright Browser instance
    * @param config Scraper configuration
+   * @param extractionOnly Whether this instance should be extraction-only (no downloads)
    */
   constructor(
     page: Page,
     context: BrowserContext,
     browser: Browser,
-    config: ScraperConfig
+    config: ScraperConfig,
+    extractionOnly: boolean = false
   ) {
     super(page, context, browser);
     this.config = config;
-    this.imageDownloader = new ImageDownloader(config.downloadPath);
+    this.extractionOnlyMode = extractionOnly;
     this.progressLogger = ProgressLogger.getInstance();
     
-    // Initialize Google Drive uploader if enabled
-    if (config.googleDrive?.enableUpload && config.googleDrive?.rootFolderId) {
-      try {
-        this.googleDriveUploader = new GoogleDriveUploader(
-          config.googleDrive.credentialsPath,
-          config.googleDrive.rootFolderId
-        );
-        this.progressLogger.info('Google Drive integration enabled');
-      } catch (error) {
-        this.progressLogger.error('Failed to initialize Google Drive uploader', error as Error);
+    // Initialize ImageDownloader unless in extraction-only mode
+    if (!this.extractionOnlyMode) {
+      this.imageDownloader = new ImageDownloader(config.downloadPath);
+      
+      // Initialize Google Drive uploader if enabled
+      if (config.googleDrive?.enableUpload && config.googleDrive?.rootFolderId) {
+        try {
+          this.googleDriveUploader = new GoogleDriveUploader(
+            config.googleDrive.credentialsPath,
+            config.googleDrive.rootFolderId
+          );
+          this.progressLogger.info('Google Drive integration enabled');
+        } catch (error) {
+          this.progressLogger.error('Failed to initialize Google Drive uploader', error as Error);
+        }
       }
     }
   }
@@ -830,5 +838,49 @@ export class TwitterScraper extends BasePage {
       uploadResults,
       totalUploadStats
     };
+  }
+  
+  /**
+   * Extract image URLs only without downloading (for concurrent processing)
+   * @param username Twitter username to extract images from
+   * @returns Array of image data objects
+   */
+  public async extractImageUrlsOnly(username: string): Promise<ImageData[]> {
+    try {
+      await this.navigateToProfileMediaTab(username);
+      
+      // Check if account is private or suspended
+      if (await this.isPrivateAccount() || await this.isSuspendedAccount()) {
+        return [];
+      }
+      
+      await this.scrollAndLoadMedia();
+      return await this.extractImageUrls();
+    } catch (error) {
+      this.logger.error(`Error extracting image URLs for @${username}`, error as Error);
+      throw error;
+    }
+  }
+  
+  /**
+   * Download images from pre-extracted data (for concurrent processing)
+   * @param extractedData Array of image data objects
+   * @param username Twitter username
+   * @returns Download result
+   */
+  public async downloadFromExtractedData(
+    extractedData: ImageData[],
+    username: string
+  ): Promise<{ 
+    stats: { successful: number; failed: number; skipped: number; total: number; }; 
+    downloadedPaths: string[];
+    uploadResults?: UploadResult[];
+    totalUploadStats?: UploadResult;
+  }> {
+    // Set the current username for proper path organization
+    this.currentUsername = username;
+    
+    // Use the existing download method
+    return await this.downloadImages(extractedData);
   }
 }

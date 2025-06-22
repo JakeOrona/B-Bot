@@ -163,7 +163,12 @@ export class ConfigManager {
         '# Google Drive Configuration\n' +
         'GOOGLE_DRIVE_ENABLED=false\n' +
         'GOOGLE_DRIVE_CREDENTIALS_PATH=config/google-service-account.json\n' +
-        'GOOGLE_DRIVE_ROOT_FOLDER_ID=your_root_folder_id_here\n';
+        'GOOGLE_DRIVE_ROOT_FOLDER_ID=your_root_folder_id_here\n\n' +
+        '# Concurrent Processing Configuration\n' +
+        'ENABLE_CONCURRENT_PROCESSING=true\n' +
+        'MAX_CONCURRENT_PROFILES=3\n' +
+        'EXTRACTION_TIMEOUT_MS=300000\n' +
+        'QUEUE_MAX_SIZE=100\n';
       
       fs.writeFileSync(envFilePath, defaultEnv);
     }
@@ -190,6 +195,24 @@ export class ConfigManager {
       logMode: (process.env.LOG_MODE as 'concise' | 'verbose') || 'concise',
       showProgressBars: process.env.SHOW_PROGRESS_BARS !== 'false',
       logToFile: process.env.LOG_TO_FILE !== 'false'
+    };
+  }
+  
+  /**
+   * Get concurrent processing configuration
+   * @returns Concurrent processing configuration
+   */
+  public getConcurrentConfig(): { 
+    enabled: boolean; 
+    maxConcurrentProfiles: number; 
+    extractionTimeoutMs: number;
+    queueMaxSize: number;
+  } {
+    return {
+      enabled: process.env.ENABLE_CONCURRENT_PROCESSING === 'true',
+      maxConcurrentProfiles: parseInt(process.env.MAX_CONCURRENT_PROFILES || '3', 10),
+      extractionTimeoutMs: parseInt(process.env.EXTRACTION_TIMEOUT_MS || '300000', 10), // 5 minutes
+      queueMaxSize: parseInt(process.env.QUEUE_MAX_SIZE || '100', 10)
     };
   }
 }

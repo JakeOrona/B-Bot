@@ -117,6 +117,7 @@ class TwitterImageScraper {
     try {
       const authCredentials = this.configManager.getAuthCredentials();
       const scraperConfig = this.configManager.getScraperConfig();
+      const concurrentConfig = this.configManager.getConcurrentConfig();
       
       // Initialize authentication
       const twitterAuth = new TwitterAuth(this.page, this.context, this.browser);
@@ -125,85 +126,114 @@ class TwitterImageScraper {
       this.logger.info('Logging in to Twitter...');
       await twitterAuth.login(authCredentials);
       
-      // Initialize scraper
-      const twitterScraper = new TwitterScraper(
-        this.page,
-        this.context,
-        this.browser,
-        scraperConfig
-      );
-      
       // Get list of artists to scrape
       const artists = this.configManager.loadArtists();
       this.logger.info(`Found ${artists.length} artists to scrape`);
       
-      // Process each artist
-      for (const artist of artists) {
-        try {
-          this.logger.info(`Processing artist: @${artist}`);
-          
-          // Navigate to artist profile
-          await twitterScraper.navigateToProfileMediaTab(artist);
-          
-          // Check if account is private or suspended
-          if (await twitterScraper.isPrivateAccount()) {
-            this.logger.warn(`Skipping private account: @${artist}`);
-            continue;
-          }
-          
-          if (await twitterScraper.isSuspendedAccount()) {
-            this.logger.warn(`Skipping suspended account: @${artist}`);
-            continue;
-          }
-          
-          // Scroll and load media
-          await twitterScraper.scrollAndLoadMedia();
-          
-          // Extract image URLs
-          const imageDataList = await twitterScraper.extractImageUrls();
-          
-          if (imageDataList.length === 0) {
-            this.logger.warn(`No images found for @${artist}`);
-            continue;
-          }
-          
-          // Download images with concurrent uploads
-          const downloadResult = await twitterScraper.downloadImages(imageDataList);
-          
-          // If we're using the old upload flow (not concurrent)
-          if (this.googleDriveUploader && downloadResult.downloadedPaths.length > 0 && !downloadResult.totalUploadStats) {
-            try {
-              this.logger.info(`Starting batch upload of ${downloadResult.downloadedPaths.length} images for @${artist}`);
-              const uploadResult = await this.googleDriveUploader.batchUpload(downloadResult.downloadedPaths, artist);
-              this.logger.success(`Upload completed for @${artist}: ${uploadResult.successful}/${uploadResult.total} successful, ${uploadResult.failed} failed, ${uploadResult.skipped} skipped`);
-            } catch (error) {
-              this.logger.error(`Upload failed for @${artist}`, error as Error);
-              // Continue processing next artist even if upload fails
+      // Check if concurrent processing should be used
+      if (concurrentConfig.enabled && artists.length > 1) {
+        this.logger.info(`Using concurrent processing with ${concurrentConfig.maxConcurrentProfiles} workers`);
+        
+        // Import the ConcurrentProfileManager
+        const { ConcurrentProfileManager } = await import('./utilities/ConcurrentProfileManager');
+        
+        // Initialize concurrent profile manager
+        const concurrentManager = new ConcurrentProfileManager(
+          this.browser,
+          this.context,
+          this.page,
+          scraperConfig,
+          concurrentConfig
+        );
+        
+        // Start concurrent processing of all artists
+        await concurrentManager.startProcessing(artists);
+        
+        // Get combined statistics
+        const stats = concurrentManager.getProcessingStats();
+        this.logger.success(
+          `Concurrent processing completed: Processed ${stats.completedProfiles}/${stats.totalProfiles} artists, ` +
+          `Downloaded ${stats.totalImagesDownloaded}/${stats.totalImages} images`
+        );
+      } else {
+        // Initialize scraper for sequential processing
+        const twitterScraper = new TwitterScraper(
+          this.page,
+          this.context,
+          this.browser,
+          scraperConfig
+        );
+        
+        this.logger.info(`Using sequential processing for ${artists.length} artists`);
+        
+        // Process each artist sequentially
+        for (const artist of artists) {
+          try {
+            this.logger.info(`Processing artist: @${artist}`);
+            
+            // Navigate to artist profile
+            await twitterScraper.navigateToProfileMediaTab(artist);
+            
+            // Check if account is private or suspended
+            if (await twitterScraper.isPrivateAccount()) {
+              this.logger.warn(`Skipping private account: @${artist}`);
+              continue;
             }
-          } else if (downloadResult.totalUploadStats) {
-            // Concurrent uploads completed, just log the final stats
-            this.logger.success(
-              `Processing completed for @${artist}: Downloaded ${downloadResult.stats.successful}/${downloadResult.stats.total} images, ` +
-              `Uploaded ${downloadResult.totalUploadStats.successful}/${downloadResult.totalUploadStats.total} images to Google Drive`
-            );
+            
+            if (await twitterScraper.isSuspendedAccount()) {
+              this.logger.warn(`Skipping suspended account: @${artist}`);
+              continue;
+            }
+            
+            // Scroll and load media
+            await twitterScraper.scrollAndLoadMedia();
+            
+            // Extract image URLs
+            const imageDataList = await twitterScraper.extractImageUrls();
+            
+            if (imageDataList.length === 0) {
+              this.logger.warn(`No images found for @${artist}`);
+              continue;
+            }
+            
+            // Download images with concurrent uploads
+            const downloadResult = await twitterScraper.downloadImages(imageDataList);
+            
+            // If we're using the old upload flow (not concurrent)
+            if (this.googleDriveUploader && downloadResult.downloadedPaths.length > 0 && !downloadResult.totalUploadStats) {
+              try {
+                this.logger.info(`Starting batch upload of ${downloadResult.downloadedPaths.length} images for @${artist}`);
+                const uploadResult = await this.googleDriveUploader.batchUpload(downloadResult.downloadedPaths, artist);
+                this.logger.success(`Upload completed for @${artist}: ${uploadResult.successful}/${uploadResult.total} successful, ${uploadResult.failed} failed, ${uploadResult.skipped} skipped`);
+              } catch (error) {
+                this.logger.error(`Upload failed for @${artist}`, error as Error);
+                // Continue processing next artist even if upload fails
+              }
+            } else if (downloadResult.totalUploadStats) {
+              // Concurrent uploads completed, just log the final stats
+              this.logger.success(
+                `Processing completed for @${artist}: Downloaded ${downloadResult.stats.successful}/${downloadResult.stats.total} images, ` +
+                `Uploaded ${downloadResult.totalUploadStats.successful}/${downloadResult.totalUploadStats.total} images to Google Drive`
+              );
+            }
+            
+            // Add a delay between processing artists
+            await new Promise(resolve => setTimeout(resolve, scraperConfig.rateLimitDelay));
+          } catch (error) {
+            if (error instanceof ScraperError) {
+              this.logger.error(`Error processing artist @${artist}`, error, error.type);
+            } else {
+              this.logger.error(`Error processing artist @${artist}`, error as Error);
+            }
+            // Continue with next artist
+            continue;
           }
-          
-          // Add a delay between processing artists
-          await new Promise(resolve => setTimeout(resolve, scraperConfig.rateLimitDelay));
-        } catch (error) {
-          if (error instanceof ScraperError) {
-            this.logger.error(`Error processing artist @${artist}`, error, error.type);
-          } else {
-            this.logger.error(`Error processing artist @${artist}`, error as Error);
-          }
-          // Continue with next artist
-          continue;
         }
+        
+        // Log download stats
+        const stats = twitterScraper.getDownloadStats();
+        this.logger.success(`Scraping completed. Downloaded ${stats.successful}/${stats.total} images`);
       }
-      
-      // Log download stats
-      const stats = twitterScraper.getDownloadStats();
-      this.logger.success(`Scraping completed. Downloaded ${stats.successful}/${stats.total} images`);
       
       // Clean up old files based on retention policy (keep files for 3 days by default)
       try {
@@ -236,6 +266,7 @@ class TwitterImageScraper {
     try {
       const authCredentials = this.configManager.getAuthCredentials();
       const scraperConfig = this.configManager.getScraperConfig();
+      const concurrentConfig = this.configManager.getConcurrentConfig();
       
       // Initialize authentication
       const twitterAuth = new TwitterAuth(this.page, this.context, this.browser);
@@ -244,73 +275,103 @@ class TwitterImageScraper {
       this.logger.info('Logging in to Twitter...');
       await twitterAuth.login(authCredentials);
       
-      // Initialize scraper
-      const twitterScraper = new TwitterScraper(
-        this.page,
-        this.context,
-        this.browser,
-        scraperConfig
-      );
-      
       // Get list of artists to scrape
       const artists = this.configManager.loadArtists();
       this.logger.info(`Found ${artists.length} artists to scrape in scrape-only mode`);
       
-      // Process each artist
-      for (const artist of artists) {
-        try {
-          this.logger.info(`Processing artist: @${artist}`);
-          
-          // Navigate to artist profile
-          await twitterScraper.navigateToProfileMediaTab(artist);
-          
-          // Check if account is private or suspended
-          if (await twitterScraper.isPrivateAccount()) {
-            this.logger.warn(`Skipping private account: @${artist}`);
+      // Check if concurrent processing should be used
+      if (concurrentConfig.enabled && artists.length > 1) {
+        this.logger.info(`Using concurrent processing with ${concurrentConfig.maxConcurrentProfiles} workers for scrape-only mode`);
+        
+        // Override Google Drive settings
+        scraperConfig.googleDrive = { enableUpload: false, credentialsPath: '', rootFolderId: '' };
+        
+        // Import the ConcurrentProfileManager
+        const { ConcurrentProfileManager } = await import('./utilities/ConcurrentProfileManager');
+        
+        // Initialize concurrent profile manager
+        const concurrentManager = new ConcurrentProfileManager(
+          this.browser,
+          this.context,
+          this.page,
+          scraperConfig,
+          concurrentConfig
+        );
+        
+        // Start concurrent processing of all artists
+        await concurrentManager.startProcessing(artists);
+        
+        // Get combined statistics
+        const stats = concurrentManager.getProcessingStats();
+        this.logger.success(
+          `Concurrent processing completed: Processed ${stats.completedProfiles}/${stats.totalProfiles} artists, ` +
+          `Downloaded ${stats.totalImagesDownloaded}/${stats.totalImages} images`
+        );
+      } else {
+        // Initialize scraper
+        const twitterScraper = new TwitterScraper(
+          this.page,
+          this.context,
+          this.browser,
+          scraperConfig
+        );
+        
+        // Process each artist
+        for (const artist of artists) {
+          try {
+            this.logger.info(`Processing artist: @${artist}`);
+            
+            // Navigate to artist profile
+            await twitterScraper.navigateToProfileMediaTab(artist);
+            
+            // Check if account is private or suspended
+            if (await twitterScraper.isPrivateAccount()) {
+              this.logger.warn(`Skipping private account: @${artist}`);
+              continue;
+            }
+            
+            if (await twitterScraper.isSuspendedAccount()) {
+              this.logger.warn(`Skipping suspended account: @${artist}`);
+              continue;
+            }
+            
+            // Scroll and load media
+            await twitterScraper.scrollAndLoadMedia();
+            
+            // Extract image URLs
+            const imageDataList = await twitterScraper.extractImageUrls();
+            
+            if (imageDataList.length === 0) {
+              this.logger.warn(`No images found for @${artist}`);
+              continue;
+            }
+            
+            // Download images without uploading
+            const downloadResult = await twitterScraper.downloadImages(imageDataList);
+            this.logger.info(`Downloaded ${downloadResult.downloadedPaths.length} images for @${artist}`);
+            
+            // Add a delay between processing artists
+            await new Promise(resolve => setTimeout(resolve, scraperConfig.rateLimitDelay));
+          } catch (error) {
+            if (error instanceof ScraperError) {
+              this.logger.error(`Error processing artist @${artist}`, error, error.type);
+            } else {
+              this.logger.error(`Error processing artist @${artist}`, error as Error);
+            }
+            // Continue with next artist
             continue;
           }
-          
-          if (await twitterScraper.isSuspendedAccount()) {
-            this.logger.warn(`Skipping suspended account: @${artist}`);
-            continue;
-          }
-          
-          // Scroll and load media
-          await twitterScraper.scrollAndLoadMedia();
-          
-          // Extract image URLs
-          const imageDataList = await twitterScraper.extractImageUrls();
-          
-          if (imageDataList.length === 0) {
-            this.logger.warn(`No images found for @${artist}`);
-            continue;
-          }
-          
-          // Download images without uploading
-          const downloadResult = await twitterScraper.downloadImages(imageDataList);
-          this.logger.info(`Downloaded ${downloadResult.downloadedPaths.length} images for @${artist}`);
-          
-          // Add a delay between processing artists
-          await new Promise(resolve => setTimeout(resolve, scraperConfig.rateLimitDelay));
-        } catch (error) {
-          if (error instanceof ScraperError) {
-            this.logger.error(`Error processing artist @${artist}`, error, error.type);
-          } else {
-            this.logger.error(`Error processing artist @${artist}`, error as Error);
-          }
-          // Continue with next artist
-          continue;
         }
+        
+        // Log download stats
+        const stats = twitterScraper.getDownloadStats();
+        this.logger.success(`Scraping completed. Downloaded ${stats.successful}/${stats.total} images`);
       }
-      
-      // Log download stats
-      const stats = twitterScraper.getDownloadStats();
-      this.logger.success(`Scrape-only completed. Downloaded ${stats.successful}/${stats.total} images`);
       
       // Logout
       await twitterAuth.logout();
     } catch (error) {
-      this.logger.error('Scrape-only execution failed', error as Error);
+      this.logger.error('Scraper execution failed', error as Error);
       throw error;
     } finally {
       await this.cleanup();
@@ -318,327 +379,139 @@ class TwitterImageScraper {
   }
   
   /**
-   * Run upload-only mode (without scraping Twitter)
-   * This mode will scan the download directory for existing images and upload them to Google Drive
+   * Run upload-only mode (upload existing files without scraping)
    */
   public async runUploadOnly(): Promise<void> {
     try {
       const scraperConfig = this.configManager.getScraperConfig();
+      const googleDriveConfig = this.configManager.getGoogleDriveConfig();
       
-      // Ensure Google Drive uploader is initialized
-      if (!this.googleDriveUploader) {
-        const googleDriveConfig = this.configManager.getGoogleDriveConfig();
-        if (!googleDriveConfig.enableUpload) {
-          throw new Error('Google Drive upload is not enabled in configuration');
-        }
-        
-        try {
-          this.googleDriveUploader = new GoogleDriveUploader(
-            googleDriveConfig.credentialsPath,
-            googleDriveConfig.rootFolderId
-          );
-          this.logger.info('Google Drive uploader initialized');
-        } catch (error) {
-          throw new Error(`Failed to initialize Google Drive uploader: ${(error as Error).message}`);
-        }
+      if (!googleDriveConfig.enableUpload || !googleDriveConfig.rootFolderId) {
+        throw new ScraperError(
+          'Google Drive upload is not enabled or properly configured',
+          ScraperErrorType.CONFIG_ERROR
+        );
       }
       
       this.logger.info('Starting upload-only mode');
       
-      // Scan existing images in the download directory
-      const existingImages = await this.scanExistingImages(scraperConfig.downloadPath);
-      
-      if (Object.keys(existingImages).length === 0) {
-        this.logger.info('No images found in the download directory to upload.');
-        return;
-      }
-      
-      this.logger.info(`Found ${Object.keys(existingImages).length} artists with images to upload`);
-      
-      // Process each artist's folder
-      for (const artist of Object.keys(existingImages)) {
-        const imagePaths = existingImages[artist];
-        
-        if (imagePaths.length === 0) {
-          this.logger.warn(`No images found for ${artist}, skipping...`);
-          continue;
-        }
-        
-        try {
-          this.logger.info(`Starting batch upload of ${imagePaths.length} images for @${artist}`);
-          const uploadResult = await this.googleDriveUploader.batchUpload(imagePaths, artist);
-          this.logger.success(`Upload completed for @${artist}: ${uploadResult.successful}/${uploadResult.total} successful, ${uploadResult.failed} failed, ${uploadResult.skipped} skipped`);
-        } catch (error) {
-          this.logger.error(`Upload failed for @${artist}`, error as Error);
-          // Continue with next artist
-        }
-      }
-      
-      this.logger.success('Upload-only mode completed successfully');
-      
-      // Clean up old files based on retention policy (keep files for 3 days by default)
-      try {
-        this.logger.info('Starting cleanup of files older than 3 days...');
-        await FileCleanup.cleanupOldFiles(scraperConfig.downloadPath, 3);
-        this.logger.info('File cleanup completed');
-      } catch (error) {
-        this.logger.error('File cleanup failed', error as Error);
-        // Continue execution - cleanup failure shouldn't halt the process
-      }
-    } catch (error) {
-      this.logger.error('Upload-only execution failed', error as Error);
-      throw error;
-    }
-  }
-  
-  /**
-   * Scan the download directory for existing images
-   * @param downloadPath The base download directory path
-   * @returns Object mapping artist names to arrays of image file paths
-   */
-  private async scanExistingImages(downloadPath: string): Promise<Record<string, string[]>> {
-    const result: Record<string, string[]> = {};
-    
-    try {
-      // Ensure the download directory exists
-      if (!fs.existsSync(downloadPath)) {
-        this.logger.warn(`Download directory not found: ${downloadPath}`);
-        return result;
-      }
-      
-      // Read the directory contents
-      const items = fs.readdirSync(downloadPath);
-      
-      // Filter for directories (each directory is an artist)
-      const artistDirs = items.filter(item => {
-        const itemPath = path.join(downloadPath, item);
-        return fs.statSync(itemPath).isDirectory();
-      });
-      
-      if (artistDirs.length === 0) {
-        this.logger.warn('No artist directories found in the download path');
-        return result;
-      }
-      
-      // Process each artist directory
-      for (const artist of artistDirs) {
-        const artistPath = path.join(downloadPath, artist);
-        const files = fs.readdirSync(artistPath);
-        
-        // Filter for image files
-        const imageFiles = files.filter(file => {
-          const ext = path.extname(file).toLowerCase();
-          return ['.jpg', '.jpeg', '.png', '.gif', '.webp'].includes(ext);
-        });
-        
-        if (imageFiles.length > 0) {
-          // Map to full file paths
-          result[artist] = imageFiles.map(file => path.join(artistPath, file));
-        }
-      }
-      
-      return result;
-    } catch (error) {
-      this.logger.error('Error scanning existing images', error as Error);
-      return result;
-    }
-  }
-  
-  /**
-   * Debug Google Drive configuration and permissions
-   * Runs diagnostics on the Google Drive setup
-   */
-  public async debugGoogleDrive(): Promise<void> {
-    this.logger.info('=== Google Drive Debug Mode ===');
-    
-    try {
-      // Get Google Drive configuration
-      const googleDriveConfig = this.configManager.getGoogleDriveConfig();
-      
-      // Check if Google Drive is enabled
-      if (!googleDriveConfig.enableUpload) {
-        this.logger.error('Google Drive upload is not enabled in configuration');
-        this.logger.info('Set GOOGLE_DRIVE_ENABLED=true in your config/.env file');
-        return;
-      }
-      
-      this.logger.info('Google Drive Configuration:');
-      this.logger.info(`- Upload Enabled: ${googleDriveConfig.enableUpload}`);
-      this.logger.info(`- Credentials Path: ${googleDriveConfig.credentialsPath}`);
-      this.logger.info(`- Root Folder ID: ${googleDriveConfig.rootFolderId}`);
-      
-      // Check if credentials file exists
-      if (!fs.existsSync(googleDriveConfig.credentialsPath)) {
-        this.logger.error(`Google Drive credentials file not found at: ${googleDriveConfig.credentialsPath}`);
-        this.logger.info('Make sure you have placed your Service Account JSON file at this location');
-        return;
-      }
-      
-      // Check root folder ID
-      if (!googleDriveConfig.rootFolderId) {
-        this.logger.error('Google Drive root folder ID is empty');
-        this.logger.info('Set GOOGLE_DRIVE_ROOT_FOLDER_ID in your config/.env file');
-        return;
-      }
-      
-      // Validate folder ID format
-      const folderIdPattern = /^[a-zA-Z0-9_-]+$/;
-      if (!folderIdPattern.test(googleDriveConfig.rootFolderId)) {
-        this.logger.warn(`Root folder ID may be invalid: ${googleDriveConfig.rootFolderId}`);
-        this.logger.info('Folder ID should be a string of letters and numbers without slashes or special characters');
-      }
-      
-      this.logger.info('Initializing Google Drive uploader for testing...');
-      
-      // Initialize the Google Drive uploader
-      try {
+      // Initialize Google Drive uploader if not already initialized
+      if (!this.googleDriveUploader) {
         this.googleDriveUploader = new GoogleDriveUploader(
           googleDriveConfig.credentialsPath,
           googleDriveConfig.rootFolderId
         );
-        
-        // Run the debug access tests
-        await this.googleDriveUploader.debugFolderAccess();
-      } catch (error) {
-        this.logger.error('Google Drive initialization failed', error as Error);
-        
-        // Provide helpful advice
-        this.logger.info('\nTroubleshooting Steps:');
-        this.logger.info('1. Check that your credentials file contains valid JSON');
-        this.logger.info('2. Verify your folder ID is correct (copy from Google Drive URL)');
-        this.logger.info('3. Ensure the service account email has been added to the folder with Editor permission');
-        this.logger.info('4. Verify the Google Drive API is enabled in your Google Cloud project');
       }
+      
+      // Get artists list for folder organization
+      const artists = this.configManager.loadArtists();
+      
+      // Process each artist's folder
+      for (const artist of artists) {
+        const artistPath = path.join(scraperConfig.downloadPath, artist);
+        
+        // Check if folder exists
+        if (!fs.existsSync(artistPath)) {
+          this.logger.warn(`No download folder found for ${artist}, skipping`);
+          continue;
+        }
+        
+        // Get list of files in the folder
+        const files = fs.readdirSync(artistPath)
+          .filter(file => file.endsWith('.jpg') || file.endsWith('.png'))
+          .map(file => path.join(artistPath, file));
+        
+        if (files.length === 0) {
+          this.logger.warn(`No images found for ${artist}, skipping`);
+          continue;
+        }
+        
+        this.logger.info(`Found ${files.length} images for ${artist}, starting upload`);
+        
+        try {
+          // Upload files
+          const result = await this.googleDriveUploader.batchUpload(files, artist);
+          this.logger.success(`Upload completed for ${artist}: ${result.successful}/${result.total} successful, ${result.failed} failed, ${result.skipped} skipped`);
+        } catch (error) {
+          this.logger.error(`Upload failed for ${artist}`, error as Error);
+          // Continue with next artist
+        }
+      }
+      
+      this.logger.success('Upload-only mode completed');
     } catch (error) {
-      this.logger.error('Failed to debug Google Drive', error as Error);
+      this.logger.error('Upload-only mode failed', error as Error);
+      throw error;
     }
   }
   
   /**
    * Clean up resources
    */
-  public async cleanup(): Promise<void> {
-    this.logger.info('Cleaning up resources...');
-    
-    if (this.page) {
-      await this.page.close();
+  private async cleanup(): Promise<void> {
+    try {
+      if (this.browser) {
+        await this.browser.close();
+        this.browser = null;
+      }
+      
+      if (this.googleDriveUploader) {
+        this.googleDriveUploader = null;
+      }
+      
+      this.logger.info('Resources cleaned up');
+    } catch (error) {
+      this.logger.error('Error during cleanup', error as Error);
     }
-    
-    if (this.context) {
-      await this.context.close();
-    }
-    
-    if (this.browser) {
-      await this.browser.close();
-    }
-    
-    this.logger.info('Cleanup completed');
   }
 }
 
 /**
- * Define CLI argument types
+ * Main entry point
  */
-interface CliArgs {
-  'scrape-only'?: boolean;
-  scrapeOnly?: boolean;
-  's'?: boolean;
-  'upload-only'?: boolean;
-  uploadOnly?: boolean;
-  'u'?: boolean;
-  'debug-drive'?: boolean;
-  debugDrive?: boolean;
-  'd'?: boolean;
-  'help'?: boolean;
-  'h'?: boolean;
-  'version'?: boolean;
-  'v'?: boolean;
-  [key: string]: unknown;
-}
-
-/**
- * Entry point for the application
- */
-async function main(): Promise<void> {
+async function main() {
   // Parse command line arguments
-  const argv = yargs(hideBin(process.argv))
-    .scriptName('twitter-image-scraper')
-    .usage('$0 [options]')
-    .option('scrape-only', {
-      alias: 's',
-      type: 'boolean',
-      description: 'Run in scrape-only mode (no Google Drive upload)'
-    })
-    .option('upload-only', {
-      alias: 'u',
-      type: 'boolean',
-      description: 'Run in upload-only mode (upload existing images without scraping)'
-    })
-    .option('debug-drive', {
-      alias: 'd',
-      type: 'boolean',
-      description: 'Test Google Drive configuration and permissions'
+  const argv = await yargs(hideBin(process.argv))
+    .option('mode', {
+      alias: 'm',
+      describe: 'Mode of operation',
+      type: 'string',
+      choices: ['full', 'scrape-only', 'upload-only'],
+      default: 'full'
     })
     .help()
     .alias('help', 'h')
-    .version()
-    .alias('version', 'v')
-    .strict()
-    .parseSync() as CliArgs;
-    
-  // If help or version was requested, exit early (yargs will have printed the info)
-  if (argv.help || argv.h || argv.version || argv.v) {
-    process.exit(0);
-  }
+    .version(false)
+    .parseAsync();
 
   const scraper = new TwitterImageScraper();
-  
+
   try {
-    const isScrapeOnly = argv['scrape-only'] || argv.scrapeOnly || argv.s;
-    const isUploadOnly = argv['upload-only'] || argv.uploadOnly || argv.u;
-    const isDebugDrive = argv['debug-drive'] || argv.debugDrive || argv.d;
+    await scraper.initialize();
     
-    // Debug mode takes precedence
-    if (isDebugDrive) {
-      console.log('Running in Google Drive debug mode...');
-      await scraper.debugGoogleDrive();
-      process.exit(0);
-      return;
+    switch (argv.mode) {
+      case 'scrape-only':
+        await scraper.runScrapeOnly();
+        break;
+      case 'upload-only':
+        await scraper.runUploadOnly();
+        break;
+      default:
+        await scraper.run();
     }
     
-    // Check for conflicting flags
-    if (isScrapeOnly && isUploadOnly) {
-      console.error('Error: Cannot use both --scrape-only and --upload-only flags together');
-      process.exit(1);
-    }
-    
-    // Initialize scraper (not needed for upload-only mode)
-    if (!isUploadOnly) {
-      await scraper.initialize();
-    }
-    
-    // Determine which mode to run
-    if (isScrapeOnly) {
-      console.log('Running in scrape-only mode...');
-      await scraper.runScrapeOnly();
-    } else if (isUploadOnly) {
-      console.log('Running in upload-only mode...');
-      await scraper.runUploadOnly();
-    } else {
-      console.log('Running in full mode (scrape + upload)...');
-      await scraper.run();
-    }
-    
+    console.log(colors.green('\nTwitter Image Scraper completed successfully!'));
     process.exit(0);
   } catch (error) {
-    console.error('Fatal error:', error);
+    console.error(colors.red(`\nTwitter Image Scraper failed: ${(error as Error).message}`));
     process.exit(1);
   }
 }
 
-// Run the main function if this file is being executed directly
+// Run the application
 if (require.main === module) {
-  main();
+  main().catch(error => {
+    console.error(colors.red(`Fatal error: ${error.message}`));
+    process.exit(1);
+  });
 }
-
-export { TwitterImageScraper };
