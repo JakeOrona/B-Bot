@@ -447,8 +447,9 @@ class TwitterImageScraper {
   
   /**
    * Clean up resources
+   * Public method to allow cleanup from main() and signal handlers
    */
-  private async cleanup(): Promise<void> {
+  public async cleanup(): Promise<void> {
     try {
       if (this.browser) {
         await this.browser.close();
@@ -457,6 +458,11 @@ class TwitterImageScraper {
       
       if (this.googleDriveUploader) {
         this.googleDriveUploader = null;
+      }
+      
+      // Make sure progress bars are stopped
+      if (this.progressLogger) {
+        this.progressLogger.stopAll();
       }
       
       this.logger.info('Resources cleaned up');
@@ -479,12 +485,40 @@ async function main() {
       choices: ['full', 'scrape-only', 'upload-only'],
       default: 'full'
     })
+    .option('timeout', {
+      alias: 't',
+      describe: 'Global execution timeout in minutes',
+      type: 'number',
+      default: 60 // Default to 60 minutes
+    })
     .help()
     .alias('help', 'h')
     .version(false)
     .parseAsync();
 
   const scraper = new TwitterImageScraper();
+  let exitTimeout: NodeJS.Timeout | null = null;
+
+  // Set up signal handlers for graceful shutdown
+  process.on('SIGINT', async () => {
+    console.log(colors.yellow('\nReceived SIGINT signal, cleaning up...'));
+    await scraper.cleanup();
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', async () => {
+    console.log(colors.yellow('\nReceived SIGTERM signal, cleaning up...'));
+    await scraper.cleanup();
+    process.exit(0);
+  });
+
+  // Set global execution timeout
+  const timeoutMs = argv.timeout * 60 * 1000;
+  exitTimeout = setTimeout(() => {
+    console.error(colors.red(`\nGlobal execution timeout reached after ${argv.timeout} minutes`));
+    process.exit(1);
+  }, timeoutMs);
+  console.log(colors.cyan(`Setting global execution timeout to ${argv.timeout} minutes`));
 
   try {
     await scraper.initialize();
@@ -501,9 +535,31 @@ async function main() {
     }
     
     console.log(colors.green('\nTwitter Image Scraper completed successfully!'));
-    process.exit(0);
+    
+    // Clear timeout before exit
+    if (exitTimeout) {
+      clearTimeout(exitTimeout);
+    }
+    
+    // Add small delay to ensure logs are flushed
+    setTimeout(() => {
+      process.exit(0);
+    }, 500);
   } catch (error) {
     console.error(colors.red(`\nTwitter Image Scraper failed: ${(error as Error).message}`));
+    
+    // Clear timeout before exit
+    if (exitTimeout) {
+      clearTimeout(exitTimeout);
+    }
+    
+    // Try cleanup before exit
+    try {
+      await scraper.cleanup();
+    } catch (cleanupError) {
+      console.error(colors.red(`\nCleanup failed: ${(cleanupError as Error).message}`));
+    }
+    
     process.exit(1);
   }
 }
