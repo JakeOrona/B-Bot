@@ -18,6 +18,7 @@
     "test:debug": "npx playwright test --debug",
     "test:headed": "npx playwright test --headed",
     "test:logging": "ts-node src/demo/advancedLoggingCodeExample.ts",
+    "test:stress-log": "ts-node src/demo/stressLoggerTest.ts",
     "dev": "ts-node-dev --respawn src/index.ts",
     "demo:logger": "ts-node src/demo/progressLoggerDemo.ts",
     "demo:advancedLogger": "ts-node src/demo/advancedLoggingDemo.ts"

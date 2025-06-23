@@ -59,6 +59,8 @@ export class ProgressLogger {
     private consoleMutex: ConsoleMutex;
     private displayTimer?: NodeJS.Timeout;
     private lastUIUpdateTime: number = 0;
+    private isUpdatingDisplay: boolean = false;
+    private displayedSections: Set<string> = new Set();
     private logFilePath: {
         verbose: string;
         concise: string;
@@ -143,22 +145,43 @@ export class ProgressLogger {
         // Clear any existing timer
         if (this.displayTimer) {
             clearInterval(this.displayTimer);
+            this.displayTimer = undefined;
         }
+        
+        // Use a significantly longer refresh interval to reduce display corruption
+        // 500ms is minimum to prevent visual flicker and overlap issues
+        const refreshRate = Math.max(500, this.config.refreshInterval || 500);
         
         // Set up a new timer to refresh the display periodically
         this.displayTimer = setInterval(() => {
             const now = Date.now();
-            // Only update if sufficient time has passed (avoid too frequent updates)
-            if (now - this.lastUIUpdateTime >= this.config.refreshInterval!) {
-                this.updateDisplay();
-                this.lastUIUpdateTime = now;
+            
+            // Only update if sufficient time has passed AND not currently updating
+            // This prevents overlapping update calls that corrupt the display
+            if (!this.isUpdatingDisplay && 
+                now - this.lastUIUpdateTime >= refreshRate) {
+                // Schedule the update without awaiting to avoid timer delays
+                // Use a debounced approach to prevent rapid successive updates
+                this.isUpdatingDisplay = true; // Set flag immediately to block other refreshes
+                this.updateDisplay()
+                    .catch(err => {
+                        console.error('Error updating display:', err);
+                    })
+                    .finally(() => {
+                        // Only clear the updating flag here, not in updateDisplay
+                        // This ensures the flag remains set during the entire update cycle
+                        setTimeout(() => {
+                            this.isUpdatingDisplay = false;
+                        }, 100); // Small delay to prevent immediate re-triggering
+                    });
             }
-        }, this.config.refreshInterval);
+        }, refreshRate);
         
         // Set up cleanup on process exit
         process.on('exit', () => {
             if (this.displayTimer) {
                 clearInterval(this.displayTimer);
+                this.displayTimer = undefined;
             }
             if (this.multiBar) {
                 this.multiBar.stop();
@@ -169,6 +192,7 @@ export class ProgressLogger {
         process.on('SIGINT', () => {
             if (this.displayTimer) {
                 clearInterval(this.displayTimer);
+                this.displayTimer = undefined;
             }
             if (this.multiBar) {
                 this.multiBar.stop();
@@ -180,65 +204,160 @@ export class ProgressLogger {
     /**
      * Display the header section for the logger UI
      */
-    private displayHeader(): void {
+    private async displayHeader(): Promise<void> {
         if (!this.multiBar) return;
         
-        const timestamp = new Date().toISOString();
-        const workerCount = this.workerBars.size;
-        
-        this.multiBar.log(colors.cyan('\n=== Twitter/X Image Scraper Advanced Logging ==='));
-        this.multiBar.log(colors.cyan(`[${timestamp}] Mode: ${this.config.logMode} | Progress bars: ${this.config.showProgressBars ? 'enabled' : 'disabled'} | Workers: ${workerCount}`));
-        this.multiBar.log(colors.cyan(''));
+        // Use mutex to prevent display corruption
+        await this.consoleMutex.execute(async () => {
+            const timestamp = new Date().toISOString();
+            const workerCount = this.workerBars.size;
+            
+            // Use direct console.log instead of multiBar.log to prevent corruption
+            console.log(colors.cyan('\n=== Twitter/X Image Scraper Advanced Logging ==='));
+            console.log(colors.cyan(`[${timestamp}] Mode: ${this.config.logMode} | Progress bars: ${this.config.showProgressBars ? 'enabled' : 'disabled'} | Workers: ${workerCount}`));
+            console.log(colors.cyan(''));
+        });
     }
     
     /**
      * Update the console display with current progress and log buffer
      */
     private async updateDisplay(): Promise<void> {
+        // Skip if we don't have proper configuration
         if (!this.multiBar || !this.config.enableGroupedBars) return;
         
-        await this.consoleMutex.execute(async () => {
-            // Display worker progress section
-            if (this.workerBars.size > 0) {
-                this.multiBar!.log(colors.cyan('\n=== Worker Progress ==='));
+        // Use mutex to ensure only one update happens at a time
+        return this.consoleMutex.execute(async () => {
+            try {
+                // Flag is now set in setupDisplayRefresh before this method is called
+                // This prevents concurrent display updates that cause corruption
                 
-                // Progress bars are already visible through multiBar,
-                // no need to explicitly display them here
-            }
-            
-            // Display recent logs section if we have logs
-            if (this.logBuffer.length > 0) {
-                this.multiBar!.log(colors.cyan('\n=== Recent Logs ==='));
+                // Consider if we need a complete display reset due to corruption
+                if (this.needsDisplayReset()) {
+                    await this.resetDisplay();
+                    return;
+                }
                 
-                for (const entry of this.logBuffer) {
-                    let logColor;
-                    let prefix;
+                // Track which sections we're displaying in this update
+                const currentSections = new Set<string>();
+                
+                // ===== CLEAR SCREEN SECTION =====
+                
+                // Use a minimal clearing approach that doesn't interfere with progress bars
+                // Instead of clearing the whole screen, we'll insert blank lines and 
+                // carefully track which sections are displayed
+                
+                // Insert a divider to visually separate updates
+                console.log('\n'); // Simple blank line as a visual separator
+                
+                // ===== HEADER SECTION =====
+                
+                // Display header (only if not already displayed recently or forced refresh)
+                const headerKey = 'header';
+                const timestamp = new Date().toISOString();
+                const workerCount = this.workerBars.size;
+                
+                // Always show the header on every refresh for clarity
+                console.log(colors.cyan('=== Twitter/X Image Scraper Advanced Logging ==='));
+                console.log(colors.cyan(`[${timestamp}] Mode: ${this.config.logMode} | Progress bars: ${this.config.showProgressBars ? 'enabled' : 'disabled'} | Workers: ${workerCount}`));
+                console.log(''); // Empty line after header
+                
+                // Add to tracking
+                this.displayedSections.add(headerKey);
+                currentSections.add(headerKey);
+                
+                // ===== WORKER PROGRESS SECTION =====
+                
+                // Display worker progress section header (only if we have workers)
+                if (this.workerBars.size > 0) {
+                    const progressKey = 'worker-progress';
                     
-                    switch (entry.level) {
-                        case 'INFO':
-                            logColor = colors.blue;
-                            prefix = '[INFO]';
-                            break;
-                        case 'SUCCESS':
-                            logColor = colors.green;
-                            prefix = '[SUCCESS]';
-                            break;
-                        case 'WARN':
-                            logColor = colors.yellow;
-                            prefix = '[WARN]';
-                            break;
-                        case 'ERROR':
-                            logColor = colors.red;
-                            prefix = '[ERROR]';
-                            break;
+                    console.log(colors.cyan('=== Worker Progress ==='));
+                    
+                    // Progress bars are handled by the multiBar component,
+                    // we just need to ensure the section header is displayed
+                    
+                    // Add to tracking
+                    this.displayedSections.add(progressKey);
+                    currentSections.add(progressKey);
+                    
+                    // Add spacing after the progress section header
+                    console.log('');
+                }
+                
+                // ===== RECENT LOGS SECTION =====
+                
+                // Display recent logs section if we have logs
+                if (this.logBuffer.length > 0) {
+                    const logsKey = 'recent-logs';
+                    
+                    // Always show the logs header
+                    console.log(colors.cyan('=== Recent Logs ==='));
+                    
+                    // Add to tracking
+                    this.displayedSections.add(logsKey);
+                    currentSections.add(logsKey);
+                    
+                    // Display log entries directly with console.log
+                    // This is safer than using multiBar.log which can corrupt the display
+                    for (const entry of this.logBuffer) {
+                        let logColor;
+                        let prefix;
+                        
+                        switch (entry.level) {
+                            case 'INFO':
+                                logColor = colors.blue;
+                                prefix = '[INFO]';
+                                break;
+                            case 'SUCCESS':
+                                logColor = colors.green;
+                                prefix = '[SUCCESS]';
+                                break;
+                            case 'WARN':
+                                logColor = colors.yellow;
+                                prefix = '[WARN]';
+                                break;
+                            case 'ERROR':
+                                logColor = colors.red;
+                                prefix = '[ERROR]';
+                                break;
+                        }
+                        
+                        const time = entry.timestamp.toLocaleTimeString();
+                        const workerPrefix = this.formatWorkerContext(entry.workerContext);
+                        
+                        // Use console.log with message deduplication
+                        const logMessage = `[${time}] ${logColor(prefix)} ${workerPrefix}${entry.message}`;
+                        console.log(logMessage);
                     }
                     
-                    const time = entry.timestamp.toLocaleTimeString();
-                    const workerPrefix = this.formatWorkerContext(entry.workerContext);
-                    
-                    this.multiBar!.log(`[${time}] ${logColor(prefix)} ${workerPrefix}${entry.message}`);
+                    // Add a trailing blank line after logs
+                    console.log('');
                 }
+                
+                // Clean up sections that are no longer displayed in this update
+                // But maintain header information to avoid reprinting headers too often
+                for (const section of this.displayedSections) {
+                    if (!currentSections.has(section) && 
+                        !section.startsWith('section-') && // Keep custom sections
+                        section !== 'header') {            // Keep header
+                        this.displayedSections.delete(section);
+                    }
+                }
+                
+                // Update timestamp of last display refresh
+                this.lastUIUpdateTime = Date.now();
+                
+            } catch (error) {
+                // If we hit an error during display refresh, log it and trigger a display reset
+                console.error('Error refreshing display:', error);
+                
+                // Reset the display on error to recover
+                await this.resetDisplay();
             }
+            
+            // Important: the isUpdatingDisplay flag is managed by the calling function
+            // to ensure proper debouncing between updates
         });
     }
     
@@ -382,12 +501,8 @@ export class ProgressLogger {
             if (this.config.logMode === 'concise') {
                 const formattedMessage = `${workerPrefix}${successMessage}`;
                 
-                // Need to use multiBar.log to not disrupt other bars
-                if (this.multiBar) {
-                    this.multiBar.log(colors.green('[SUCCESS] ' + formattedMessage));
-                } else {
-                    console.log(colors.green('[SUCCESS] ' + formattedMessage));
-                }
+                // Use direct console.log instead of multiBar.log to prevent display corruption
+                console.log(colors.green('[SUCCESS] ' + formattedMessage));
             }
             
             // Log completion to concise log file if enabled
@@ -424,7 +539,7 @@ export class ProgressLogger {
     // Format the message with worker context
     const formattedMessage = `${this.formatWorkerContext(workerContext)}${message}`;
     
-    // Always log to file if enabled
+    // Always log to file if enabled - file logging is unchanged
     if (this.config.logToFile) {
         this.fileLogger.info(formattedMessage);
         
@@ -437,19 +552,29 @@ export class ProgressLogger {
     
     // Add to log buffer if using advanced features
     if (this.config.enableGroupedBars) {
-        this.addToLogBuffer('INFO', message, workerContext);
+        await this.addToLogBuffer('INFO', message, workerContext);
     }
     
     // Use mutex to synchronize console output
     await this.consoleMutex.execute(async () => {
         // Handle console output based on mode
         if (this.config.logMode === 'verbose') {
+            // In verbose mode, always show all logs directly
             console.log(colors.blue('[INFO] ') + formattedMessage);
         } else if (progressId && current !== undefined) {
-            this.updateProgress(progressId, current, message, workerContext);
-        } else if (this.config.logMode === 'concise' && this.multiBar && !this.config.enableGroupedBars) {
-            // Only log directly if not using grouped bars
-            this.multiBar.log(colors.blue('[INFO] ') + formattedMessage);
+            // If this is a progress update, use the progress system
+            await this.updateProgress(progressId, current, message, workerContext);
+        } else if (this.config.logMode === 'concise') {
+            // In concise mode, behavior depends on whether we're using grouped bars
+            if (this.config.enableGroupedBars) {
+                // With grouped bars, we only add to buffer but don't output directly
+                // This prevents corrupting the display with overlapping output
+                // The buffer will be displayed on the next updateDisplay() cycle
+                return;
+            } else {
+                // Without grouped bars, use direct console.log
+                console.log(colors.blue('[INFO] ') + formattedMessage);
+            }
         }
     });
     }
@@ -464,6 +589,7 @@ export class ProgressLogger {
     // Format the message with worker context
     const formattedMessage = `${this.formatWorkerContext(workerContext)}${message}`;
     
+    // Handle file logging first - this is unchanged
     if (this.config.logToFile) {
         this.fileLogger.success(formattedMessage);
         
@@ -475,18 +601,27 @@ export class ProgressLogger {
     
     // Add to log buffer if using advanced features
     if (this.config.enableGroupedBars) {
-        this.addToLogBuffer('SUCCESS', message, workerContext);
+        await this.addToLogBuffer('SUCCESS', message, workerContext);
     }
     
     // Use mutex to synchronize console output
     await this.consoleMutex.execute(async () => {
         if (this.config.logMode === 'verbose') {
+            // In verbose mode, always use direct console output
             console.log(colors.green('[SUCCESS] ') + formattedMessage);
         } else if (progressId) {
-            this.completeProgress(progressId, message, workerContext);
-        } else if (this.config.logMode === 'concise' && this.multiBar && !this.config.enableGroupedBars) {
-            // Only log directly if not using grouped bars
-            this.multiBar.log(colors.green('[SUCCESS] ' + formattedMessage));
+            // If we're completing a progress bar, use the specialized method
+            await this.completeProgress(progressId, message, workerContext);
+        } else if (this.config.logMode === 'concise') {
+            // In concise mode, behavior depends on whether we're using grouped bars
+            if (this.config.enableGroupedBars) {
+                // With grouped bars, we don't output directly - the buffer handles it
+                // This prevents corrupting the display with overlapping output
+                return;
+            } else {
+                // Without grouped bars, use direct console output
+                console.log(colors.green('[SUCCESS] ') + formattedMessage);
+            }
         }
     });
     }
@@ -513,11 +648,11 @@ export class ProgressLogger {
     
     // Add to log buffer if using advanced features
     if (this.config.enableGroupedBars) {
-        this.addToLogBuffer('ERROR', message, workerContext);
+        await this.addToLogBuffer('ERROR', message, workerContext);
         
         // If there's an error message, add that too
         if (error && error.message) {
-            this.addToLogBuffer('ERROR', `  ${error.message}`, workerContext);
+            await this.addToLogBuffer('ERROR', `  ${error.message}`, workerContext);
         }
     }
     
@@ -525,18 +660,13 @@ export class ProgressLogger {
     await this.consoleMutex.execute(async () => {
         // Always show errors regardless of mode
         const errorPrefix = colors.red('[ERROR] ');
-        if (this.config.logMode === 'concise' && this.multiBar && !this.config.enableGroupedBars) {
-            // Only log directly if not using grouped bars
-            this.multiBar.log(errorPrefix + formattedMessage);
-            if (error && error.message) {
-                this.multiBar.log(colors.red(`  ${this.formatWorkerContext(workerContext)}${error.message}`));
-            }
-        } else if (this.config.logMode !== 'concise' || !this.multiBar) {
-            // In verbose mode or if no multibar
-            console.log(errorPrefix + formattedMessage);
-            if (error && error.message) {
-                console.log(colors.red(`  ${this.formatWorkerContext(workerContext)}${error.message}`));
-            }
+        
+        // For errors, always use direct console output for critical visibility
+        // regardless of the logging mode
+        console.log(errorPrefix + formattedMessage);
+        
+        if (error && error.message) {
+            console.log(colors.red(`  ${this.formatWorkerContext(workerContext)}${error.message}`));
         }
     });
     }
@@ -550,6 +680,7 @@ export class ProgressLogger {
     // Format the message with worker context
     const formattedMessage = `${this.formatWorkerContext(workerContext)}${message}`;
     
+    // File logging is unchanged
     if (this.config.logToFile) {
         this.fileLogger.warn(formattedMessage);
         
@@ -561,20 +692,22 @@ export class ProgressLogger {
     
     // Add to log buffer if using advanced features
     if (this.config.enableGroupedBars) {
-        this.addToLogBuffer('WARN', message, workerContext);
+        await this.addToLogBuffer('WARN', message, workerContext);
     }
     
     // Use mutex to synchronize console output
     await this.consoleMutex.execute(async () => {
         const warnPrefix = colors.yellow('[WARN] ');
-        if (this.config.logMode === 'verbose') {
-            console.log(colors.yellow('[WARN] ') + formattedMessage);
-        } else if (this.config.logMode === 'concise' && this.multiBar && !this.config.enableGroupedBars) {
-            // Only log directly if not using grouped bars
-            this.multiBar.log(warnPrefix + formattedMessage);
-        } else if (this.config.logMode !== 'concise' || !this.multiBar) {
+        
+        // Warnings are important enough to always show directly
+        // regardless of mode, unless we're in grouped mode where
+        // they'll appear in the log buffer
+        if (this.config.logMode === 'verbose' || 
+            (this.config.logMode === 'concise' && !this.config.enableGroupedBars)) {
+            // Use direct console output
             console.log(warnPrefix + formattedMessage);
-        }
+        } 
+        // In concise+grouped mode, the warning will be shown in the buffer display
     });
     }
     
@@ -589,6 +722,10 @@ export class ProgressLogger {
         const formattedSectionTitle = `=== ${title} ===`;
         const logMessage = `${workerPrefix}${formattedSectionTitle}`;
         
+        // Generate a unique section key based on title and worker
+        const sectionKey = `section-${title}-${workerPrefix}`;
+        
+        // Handle file logging first - this is unchanged
         if (this.config.logToFile) {
             this.fileLogger.info(logMessage);
             
@@ -598,20 +735,35 @@ export class ProgressLogger {
             }
         }
         
-        // Add to log buffer if using advanced features
+        // Add to log buffer if using advanced features 
         if (this.config.enableGroupedBars) {
-            this.addToLogBuffer('INFO', `\n=== ${title.toUpperCase()} ===`, workerContext);
+            await this.addToLogBuffer('INFO', `=== ${title.toUpperCase()} ===`, workerContext);
         }
         
         // Use mutex to synchronize console output
         await this.consoleMutex.execute(async () => {
-            const formattedTitle = colors.cyan(`\n${workerPrefix}=== ${title.toUpperCase()} ===`);
-            if (this.config.logMode === 'concise' && this.multiBar && !this.config.enableGroupedBars) {
-                // Only log directly if not using grouped bars
-                this.multiBar.log(formattedTitle);
-            } else if (this.config.logMode !== 'concise' || !this.multiBar) {
-                console.log(formattedTitle);
+            // Enhanced deduplication logic:
+            // 1. Check if this section was shown recently
+            // 2. Add a time component to prevent indefinite suppression
+            const isDuplicate = this.displayedSections.has(sectionKey) && 
+                              Date.now() - this.lastUIUpdateTime < 5000;
+                              
+            if (isDuplicate) {
+                // If duplicate and recent, skip output
+                return;
             }
+            
+            // Use a newline prefix for cleaner separation
+            const formattedTitle = colors.cyan(`\n${workerPrefix}=== ${title.toUpperCase()} ===`);
+            
+            // Always use direct console.log for sections to prevent corruption
+            console.log(formattedTitle);
+            
+            // Add small spacer after section header
+            console.log('');
+            
+            // Mark this section as displayed with timestamp
+            this.displayedSections.add(sectionKey);
         });
     }
     
@@ -634,22 +786,46 @@ export class ProgressLogger {
      * @param message Log message
      * @param workerContext Worker context
      */
-    private addToLogBuffer(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', message: string, workerContext?: WorkerContext): void {
-        // Create a new log entry
-        const entry: LogEntry = {
-            timestamp: new Date(),
-            level,
-            message,
-            workerContext
-        };
-        
-        // Add to the buffer
-        this.logBuffer.push(entry);
-        
-        // Keep buffer size within limits
-        if (this.logBuffer.length > this.config.bufferSize!) {
-            this.logBuffer.shift(); // Remove oldest entry
-        }
+    private async addToLogBuffer(level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR', message: string, workerContext?: WorkerContext): Promise<void> {
+        // Use mutex for thread-safe buffer modification
+        await this.consoleMutex.execute(async () => {
+            // Create a new log entry
+            const entry: LogEntry = {
+                timestamp: new Date(),
+                level,
+                message,
+                workerContext
+            };
+            
+            // Enhanced duplicate detection with worker context consideration
+            const now = Date.now();
+            const workerKey = workerContext?.workerId !== undefined ? 
+                `worker-${workerContext.workerId}` : 
+                (workerContext?.username ? `user-${workerContext.username}` : 'global');
+                
+            const isDuplicate = this.logBuffer.some(existing => 
+                existing.message === message && 
+                existing.level === level && 
+                (now - existing.timestamp.getTime() < 3000) && // Longer deduplication window
+                (this.formatWorkerContext(existing.workerContext) === this.formatWorkerContext(workerContext))); 
+                // Only consider it duplicate if from same worker
+            
+            // Skip if it's a duplicate message from the same source
+            if (isDuplicate) return;
+            
+            // Add to the buffer
+            this.logBuffer.push(entry);
+            
+            // Keep buffer size within limits, using a larger buffer for better context
+            const bufferSize = Math.max(10, this.config.bufferSize || 10);
+            while (this.logBuffer.length > bufferSize) {
+                this.logBuffer.shift(); // Remove oldest entry
+            }
+            
+            // Don't trigger immediate display refreshes - let the timer handle it
+            // This prevents too-frequent display updates that cause corruption
+            // The regular refresh timer will pick this up on next cycle
+        });
     }
     
     /**
@@ -820,6 +996,168 @@ export class ProgressLogger {
                     await this.info(`Cleanup: Removed progress tracking for Worker #${workerId}`, undefined, undefined, { workerId });
                 }
             }
+        });
+    }
+    
+    /**
+     * Check if the display appears corrupted and needs a full reset
+     * This helps recover from badly corrupted terminal states
+     * @returns True if a reset is needed
+     */
+    private needsDisplayReset(): boolean {
+        // If it's been a very long time since last update, do a reset
+        const timeSinceUpdate = Date.now() - this.lastUIUpdateTime;
+        if (timeSinceUpdate > 15000) {
+            return true;
+        }
+        
+        // If we have a lot of displayed sections, that may indicate corruption
+        if (this.displayedSections.size > 15) {
+            return true;
+        }
+        
+        // If isUpdatingDisplay flag has been stuck for too long, that indicates a problem
+        if (this.isUpdatingDisplay && timeSinceUpdate > 5000) {
+            return true;
+        }
+        
+        // Check for excess worker bars vs actual workers
+        // as a sign of display corruption
+        if (this.progressBars.size > this.workerBars.size * 3 + 5) {
+            return true;
+        }
+        
+        return false;
+    }
+    
+    /**
+     * Reset the display completely to recover from corruption
+     */
+    private async resetDisplay(): Promise<void> {
+        await this.consoleMutex.execute(async () => {
+            // Reset the display state tracking
+            this.displayedSections.clear();
+            this.isUpdatingDisplay = false;
+            
+            if (this.multiBar) {
+                try {
+                    // Try to fully clear the terminal (works in most terminals)
+                    // This is the most reliable way to fix a corrupted display
+                    console.clear();
+                    
+                    // Add separator to visually indicate a reset occurred
+                    console.log(colors.yellow('\n==== DISPLAY RESET ====\n'));
+                    
+                    // Stop and recreate the multibar to ensure clean state
+                    this.multiBar.stop();
+                    
+                    // Small delay to ensure terminal is ready
+                    await new Promise(resolve => setTimeout(resolve, 100));
+                    
+                    // Recreate the multibar with same settings
+                    this.multiBar = new cliProgress.MultiBar({
+                        clearOnComplete: false,
+                        hideCursor: true,
+                        format: '[{workerPrefix}{taskType}] {bar} {value}/{total} {percentage}% ETA: {eta}s',
+                        barCompleteChar: '\u2588',
+                        barIncompleteChar: '\u2591',
+                        noTTYOutput: false,
+                        emptyOnZero: true
+                    }, cliProgress.Presets.shades_classic);
+                    
+                    // Recreate all progress bars from our tracking data with correct state
+                    for (const [workerId, workerBarData] of this.workerBars.entries()) {
+                        const workerPrefix = `Worker#${workerId}${workerBarData.username ? `:@${workerBarData.username}` : ''}`;
+                        
+                        // Recreate scrolling bar if exists
+                        if (workerBarData.bars.scrolling) {
+                            const scrollBar = this.multiBar.create(100, 0, {
+                                workerPrefix: `${workerPrefix}`,
+                                taskType: 'Scrolling',
+                                eta: '0'
+                            });
+                            workerBarData.bars.scrolling = scrollBar;
+                        }
+                        
+                        // Recreate downloading bar if exists
+                        if (workerBarData.bars.downloading) {
+                            const downloadBar = this.multiBar.create(100, 0, {
+                                workerPrefix: `${workerPrefix}`,
+                                taskType: 'Downloading',
+                                eta: '0'
+                            });
+                            workerBarData.bars.downloading = downloadBar;
+                        }
+                        
+                        // Recreate upload bars if exist
+                        if (workerBarData.bars.uploading) {
+                            for (const [batchId, _] of workerBarData.bars.uploading.entries()) {
+                                const uploadBar = this.multiBar.create(100, 0, {
+                                    workerPrefix: `${workerPrefix}`,
+                                    taskType: `Uploading ${batchId}`,
+                                    eta: '0'
+                                });
+                                workerBarData.bars.uploading.set(batchId, uploadBar);
+                            }
+                        }
+                    }
+                    
+                    // Rebuild the regular progress bars map for backward compatibility
+                    this.progressBars = new Map();
+                    for (const [workerId, workerBarData] of this.workerBars.entries()) {
+                        if (workerBarData.bars.scrolling) {
+                            const scrollId = `scroll-${workerBarData.username || workerId}`;
+                            this.progressBars.set(scrollId, workerBarData.bars.scrolling);
+                        }
+                        if (workerBarData.bars.downloading) {
+                            const downloadId = `download-${workerBarData.username || workerId}`;
+                            this.progressBars.set(downloadId, workerBarData.bars.downloading);
+                        }
+                    }
+                    
+                } catch (error) {
+                    console.error('Failed to reset display:', error);
+                }
+                
+                // Clear log buffer to prevent duplicate messages
+                this.logBuffer = [];
+                
+                // Redisplay header
+                await this.displayHeader();
+                
+                // Force an immediate update of the display
+                this.lastUIUpdateTime = 0; // Force refresh by invalidating last update time
+            }
+        });
+    }
+    
+    /**
+     * Safely log a message to the console without disrupting progress bars
+     * @param message Message to log
+     * @param color Optional color function to apply
+     * @param level Optional log level for buffer entries
+     * @param workerContext Optional worker context
+     */
+    private async safeLog(
+        message: string, 
+        color?: (text: string) => string, 
+        level: 'INFO' | 'SUCCESS' | 'WARN' | 'ERROR' = 'INFO',
+        workerContext?: WorkerContext
+    ): Promise<void> {
+        await this.consoleMutex.execute(async () => {
+            const formattedMessage = color ? color(message) : message;
+            
+            // In concise mode with grouped bars, add to buffer instead of direct output
+            if (this.config.logMode === 'concise' && this.config.enableGroupedBars) {
+                // Add to buffer without log prefix since that will be added in display
+                const messageWithoutPrefix = message.replace(/^\[(INFO|SUCCESS|WARN|ERROR)\]\s*/, '');
+                await this.addToLogBuffer(level, messageWithoutPrefix, workerContext);
+                return;
+            }
+            
+            // For all other modes, use direct console output
+            // This is safer than multiBar.log which can corrupt the display
+            console.log(formattedMessage);
         });
     }
 }
