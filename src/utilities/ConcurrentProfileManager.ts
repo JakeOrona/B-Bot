@@ -159,6 +159,11 @@ export class ConcurrentProfileManager extends EventEmitter {
       ]);
     });
     
+    // Give extraction workers a head start before starting download processor
+    // This ensures they have time to fetch profile pages and start extraction
+    this.logger.info('Delaying download processor startup to give extraction workers a head start...');
+    await new Promise(resolve => setTimeout(resolve, 4000));
+    
     // Start download processor with timeout
     const downloadTimeoutMs = this.concurrentConfig.extractionTimeoutMs * 2;
     const downloadProcessorPromise = Promise.race([
@@ -256,7 +261,25 @@ export class ConcurrentProfileManager extends EventEmitter {
    * Handle extraction completion event
    */
   private async handleExtractionComplete(username: string): Promise<void> {
-    this.logger.info(`Extraction completed for @${username}, queued for download processing`);
+    // Get the profile item from the queue to verify it has image data
+    const profileItem = this.profileQueue.getAllProfiles().find(p => p.username === username);
+    
+    if (profileItem?.imageData?.length) {
+      this.logger.info(`Extraction completed for @${username}, queued for download processing with ${profileItem.imageData.length} images`);
+      
+      // Additional validation to ensure image data is properly attached
+      if (profileItem.imageData.some(img => !img.url)) {
+        this.logger.warn(`Warning: Some image data for @${username} may be incomplete. This could cause download issues.`);
+      }
+      
+      // Log the first few image URLs for debugging purposes
+      const sampleImageData = profileItem.imageData.slice(0, 2);
+      this.logger.info(`Sample image data for @${username}: ${JSON.stringify(sampleImageData)}`);
+    } else if (profileItem) {
+      this.logger.warn(`Extraction completed for @${username} but no image data found, this may cause download issues`);
+    } else {
+      this.logger.error(`Extraction completed event received for @${username} but profile not found in queue`);
+    }
   }
 
   /**
@@ -265,15 +288,27 @@ export class ConcurrentProfileManager extends EventEmitter {
   private async processPendingDownloads(): Promise<void> {
     try {
       let idleCount = 0;
-      const MAX_IDLE_ITERATIONS = 5; // Reduced from 10 to exit faster
+      const MAX_IDLE_ITERATIONS = 20; // Increased significantly to prevent premature exit
       const PROCESS_TIMEOUT_MS = this.concurrentConfig.extractionTimeoutMs * 2; // Double the extraction timeout
       const startTime = Date.now();
       let lastProfileCount = 0;
+      let waitingForExtraction = true; // Flag to indicate we're expecting extraction workers to complete
+      let initialExtractionPhase = true; // Flag to indicate initial extraction phase
+      
+      this.logger.info(`Download processor started - will process images as they become available`);
       
       // Add status check interval to force periodic status checks
       const statusCheckInterval = setInterval(() => {
         const stats = this.profileQueue.getStats();
         this.logger.info(`Download processor status check: ${JSON.stringify(stats)}`);
+        
+        // Debug info about profiles in downloading status
+        if (stats.downloading > 0) {
+          const downloadingProfiles = this.profileQueue.getAllProfiles().filter(p => p.status === ProfileStatus.DOWNLOADING);
+          for (const profile of downloadingProfiles) {
+            this.logger.info(`Download pending for @${profile.username} with ${profile.imageData?.length || 0} images`);
+          }
+        }
         
         // Exit condition: If the number of profiles in process hasn't changed for a while
         if (stats.extracting === 0 && stats.downloading === lastProfileCount && 
@@ -281,25 +316,90 @@ export class ConcurrentProfileManager extends EventEmitter {
           this.logger.warn(`Profile count unchanged for ${idleCount} iterations, possible stall detected`);
         }
         
+        // If there are still extraction workers running, we should wait
+        if (stats.extracting > 0) {
+          this.logger.info(`Download processor waiting for ${stats.extracting} extraction worker(s) to complete`);
+          waitingForExtraction = true;
+        } else if (waitingForExtraction) {
+          // If extraction was happening but now done, reset idle counter to give time for transitions
+          if (stats.downloading > 0) {
+            this.logger.info(`Extraction phase complete. Starting download phase for ${stats.downloading} profile(s)`);
+            idleCount = 0;
+            waitingForExtraction = false;
+          }
+        }
+        
         lastProfileCount = stats.downloading;
-      }, 10000); // Check every 10 seconds
+      }, 5000); // Check every 5 seconds
       
       try {
+        // Wait for a short time to allow extraction workers to start
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
         while ((this.isRunning || !this.profileQueue.isAllDone()) && 
                (Date.now() - startTime < PROCESS_TIMEOUT_MS)) {
+          
+          const queueStats = this.profileQueue.getStats();
+
+          // Debug log showing queue status at each iteration
+          if (idleCount % 3 === 0 || idleCount === 0) {
+            this.logger.info(`Download processor iteration - Queue status: ${JSON.stringify(queueStats)}, Idle count: ${idleCount}`);
+          }
           
           // Get all profiles that need downloading
           const allProfiles = this.profileQueue.getAllProfiles();
           const downloadingProfiles = allProfiles.filter(p => p.status === ProfileStatus.DOWNLOADING);
           
+          // If we're in the initial phase and no profiles are in downloading status yet
+          if (initialExtractionPhase && queueStats.downloading === 0 && queueStats.extracting > 0) {
+            this.logger.info(`Initial extraction phase in progress. Waiting for profiles to complete extraction.`);
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue;
+          }
+          
+          // If all profiles have been processed and no downloads are occurring, we can exit
+          if (queueStats.total > 0 && 
+              queueStats.total === (queueStats.completed + queueStats.failed) &&
+              queueStats.waiting === 0 && queueStats.extracting === 0 && queueStats.downloading === 0) {
+            this.logger.info(`All profiles have completed processing, download processor exiting`);
+            break;
+          }
+          
+          // If there are still extractions in progress, wait with patience
+          if (queueStats.extracting > 0) {
+            waitingForExtraction = true;
+            this.logger.info(`Download processor waiting for ${queueStats.extracting} extraction(s) to complete`);
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            continue;
+          } else if (waitingForExtraction && queueStats.downloading > 0) {
+            // Just finished extraction and we have downloads waiting - reset idle counter and exit initial phase
+            this.logger.info(`All extractions complete. Found ${queueStats.downloading} profiles waiting for download`);
+            idleCount = 0;
+            waitingForExtraction = false;
+            initialExtractionPhase = false;
+          }
+          
           // Process one profile at a time for downloads to avoid memory issues
           if (downloadingProfiles.length > 0) {
             // Reset idle counter when work is found
             idleCount = 0;
+            initialExtractionPhase = false; // We're now in download phase
             
             const profile = downloadingProfiles[0];
             
             try {
+              // Verify the profile has image data
+              if (!profile.imageData || profile.imageData.length === 0) {
+                this.logger.warn(`Profile @${profile.username} has no image data attached. Queue may be corrupted.`);
+                
+                // Re-check directly from queue to be sure
+                const freshProfile = this.profileQueue.getAllProfiles().find(p => p.username === profile.username);
+                if (freshProfile?.imageData?.length) {
+                  this.logger.info(`Re-checked profile @${profile.username} and found ${freshProfile.imageData.length} images`);
+                  profile.imageData = freshProfile.imageData;
+                }
+              }
+              
               this.logger.info(`Starting download process for @${profile.username} with ${profile.imageData?.length || 0} images`);
               
               if (profile.imageData && profile.imageData.length > 0 && this.downloadWorkerTwitterScraper) {
@@ -348,12 +448,28 @@ export class ConcurrentProfileManager extends EventEmitter {
             
             // Log only occasionally to reduce noise
             if (idleCount % 3 === 0) {
-              this.logger.info(`No profiles ready for download, waiting... (idle count: ${idleCount})`);
+              this.logger.info(`No profiles ready for download, waiting... (idle count: ${idleCount}/${MAX_IDLE_ITERATIONS})`);
+              
+              // Detailed debug to help understand if there are stuck profiles
+              const profilesWithStatus = this.profileQueue.getAllProfiles().map(p => {
+                return {
+                  username: p.username,
+                  status: p.status,
+                  imageCount: p.imageData?.length || 0
+                };
+              });
+              
+              this.logger.info(`Current profiles status: ${JSON.stringify(profilesWithStatus)}`);
             }
             
-            // If we've been idle for too long with no new downloads, exit
-            if (idleCount >= MAX_IDLE_ITERATIONS) {
-              this.logger.info(`No profiles to download after ${MAX_IDLE_ITERATIONS} checks, download processor exiting`);
+            // If we've been idle for too long with no new downloads, but still have extractions running, be patient
+            if (queueStats.extracting > 0) {
+              this.logger.info(`Waiting for ${queueStats.extracting} extraction(s) to complete`);
+              idleCount = Math.min(idleCount, MAX_IDLE_ITERATIONS / 2); // Keep idle count below threshold
+            }
+            // If we've been idle for too long with no extractions running, exit
+            else if (idleCount >= MAX_IDLE_ITERATIONS && queueStats.extracting === 0) {
+              this.logger.info(`No profiles to download after ${MAX_IDLE_ITERATIONS} checks with no extractions running, download processor exiting`);
               break;
             }
             
@@ -362,7 +478,6 @@ export class ConcurrentProfileManager extends EventEmitter {
           }
           
           // Check if all processing is complete - this is a crucial exit condition
-          const queueStats = this.profileQueue.getStats();
           if (queueStats.extracting === 0 && queueStats.downloading === 0 && queueStats.waiting === 0) {
             if (!this.profileQueue.isAllDone()) {
               // Sanity check - this shouldn't happen
@@ -374,15 +489,20 @@ export class ConcurrentProfileManager extends EventEmitter {
           
           // Aggressive exit strategy: If everything is done except a few stuck downloads
           if (queueStats.extracting === 0 && queueStats.waiting === 0 && 
-              idleCount >= MAX_IDLE_ITERATIONS / 2 && queueStats.downloading > 0) {
+              idleCount >= MAX_IDLE_ITERATIONS * 0.75 && queueStats.downloading > 0) {
             this.logger.warn(`Potential stall detected with ${queueStats.downloading} downloads pending but no progress after ${idleCount} checks`);
+            
+            // Show more detailed info about these profiles
+            const stuckProfiles = allProfiles.filter(p => p.status === ProfileStatus.DOWNLOADING);
+            for (const profile of stuckProfiles) {
+              this.logger.warn(`Possibly stuck profile: @${profile.username} with ${profile.imageData?.length || 0} images`);
+            }
             
             // If we've had multiple warnings about stalled downloads, mark them as failed and exit
             if (idleCount >= MAX_IDLE_ITERATIONS) {
               this.logger.warn(`Forcing completion of ${queueStats.downloading} stalled download(s)`);
               
               // Mark any stuck downloads as failed
-              const stuckProfiles = allProfiles.filter(p => p.status === ProfileStatus.DOWNLOADING);
               for (const profile of stuckProfiles) {
                 this.profileQueue.updateProfileStatus(
                   profile.username,
@@ -448,16 +568,58 @@ export class ConcurrentProfileManager extends EventEmitter {
    */
   public getProcessingStats(): ConcurrentProcessingStats {
     const queueStats = this.profileQueue.getStats();
+    const allProfiles = this.profileQueue.getAllProfiles();
     
-    return {
+    // Calculate total images extracted across all profiles
+    const totalImagesExtracted = allProfiles
+      .filter(p => p.imageData)
+      .reduce((sum, p) => sum + (p.imageData?.length || 0), 0);
+    
+    // Calculate profiles with successful image extraction
+    const profilesWithImages = allProfiles.filter(p => p.imageData && p.imageData.length > 0).length;
+    
+    // Get detailed download stats 
+    const stats = {
       totalProfiles: queueStats.total,
       completedProfiles: queueStats.completed,
       failedProfiles: queueStats.failed,
-      totalImagesExtracted: this.profileQueue.getAllProfiles()
-        .filter(p => p.imageData)
-        .reduce((sum, p) => sum + (p.imageData?.length || 0), 0),
+      profilesWithImages: profilesWithImages,
+      totalImagesExtracted: totalImagesExtracted,
       totalImagesDownloaded: this.downloadStats.successful,
       totalImages: this.downloadStats.total
     };
+    
+    // Debug log the individual profiles
+    this.logger.info(`Final statistics: ${JSON.stringify(stats)}`);
+    this.logger.info(`Download statistics: ${JSON.stringify(this.downloadStats)}`);
+    
+    // Log details for each profile for debugging
+    this.logger.info(`=== DETAILED PROFILE REPORT ===`);
+    for (const profile of allProfiles) {
+      // Calculate completion time in seconds if available
+      let processingTimeSeconds = 'n/a';
+      if (profile.startTime && profile.completionTime) {
+        processingTimeSeconds = ((profile.completionTime - profile.startTime) / 1000).toFixed(1) + 's';
+      }
+      
+      this.logger.info(
+        `Profile @${profile.username}: ` +
+        `status=${profile.status}, ` + 
+        `images extracted=${profile.imageData?.length || 0}, ` +
+        `processing time=${processingTimeSeconds}`
+      );
+      
+      // For completed profiles, add status info
+      if (profile.status === ProfileStatus.COMPLETED) {
+        // We don't have direct image download counts per profile in the current system
+        // A future improvement could track downloads per profile
+        this.logger.info(`  - Download completed successfully for @${profile.username}`);
+      } else if (profile.status === ProfileStatus.FAILED) {
+        this.logger.error(`  - Processing failed for @${profile.username}: ${profile.error?.message || 'Unknown error'}`);
+      }
+    }
+    this.logger.info(`===========================`);
+    
+    return stats;
   }
 }
