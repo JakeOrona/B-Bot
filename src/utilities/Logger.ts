@@ -1,5 +1,6 @@
 /**
  * Logger: Utility class for logging messages with timestamps
+ * Supports dual file logging (concise and verbose)
  */
 
 import fs from 'fs';
@@ -8,12 +9,15 @@ import { ScraperErrorType } from '../interfaces/ScraperTypes';
 
 export class Logger {
   private static instance: Logger;
+  private static additionalLoggers: Map<string, Logger> = new Map();
   private logFilePath: string;
+  private isAdditionalLogger: boolean = false;
   
   /**
    * Private constructor for singleton pattern
+   * @param logPath Optional specific log file path for additional loggers
    */
-  private constructor() {
+  private constructor(logPath?: string) {
     const logDir = path.join(process.cwd(), 'logs');
     
     // Create logs directory if it doesn't exist
@@ -21,24 +25,47 @@ export class Logger {
       fs.mkdirSync(logDir, { recursive: true });
     }
     
-    // Create a timestamped log file
-    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
-    this.logFilePath = path.join(logDir, `scraper-${timestamp}.log`);
-    
-    // Initialize log file with header
-    this.writeToFile('=== TWITTER/X IMAGE SCRAPER LOG ===');
-    this.writeToFile(`Started: ${new Date().toLocaleString()}`);
-    this.writeToFile('=====================================\n');
+    if (logPath) {
+      // For additional loggers, use the provided path
+      this.logFilePath = logPath;
+      this.isAdditionalLogger = true;
+    } else {
+      // Create a timestamped log file for the main logger
+      const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+      this.logFilePath = path.join(logDir, `scraper-${timestamp}.log`);
+      
+      // Initialize log file with header
+      this.writeToFile('=== TWITTER/X IMAGE SCRAPER LOG ===');
+      this.writeToFile(`Started: ${new Date().toLocaleString()}`);
+      this.writeToFile('=====================================\n');
+    }
   }
   
   /**
-   * Get the singleton instance
+   * Get the singleton instance of the main logger
    */
   public static getInstance(): Logger {
     if (!Logger.instance) {
       Logger.instance = new Logger();
     }
     return Logger.instance;
+  }
+  
+  /**
+   * Create an additional logger with a custom log file path
+   * @param logPath Full path to the log file
+   * @returns Logger instance for the additional log
+   */
+  public static createAdditionalLogger(logPath: string): Logger {
+    // Check if we already have a logger for this path
+    if (Logger.additionalLoggers.has(logPath)) {
+      return Logger.additionalLoggers.get(logPath)!;
+    }
+    
+    // Create new logger instance
+    const logger = new Logger(logPath);
+    Logger.additionalLoggers.set(logPath, logger);
+    return logger;
   }
   
   /**
@@ -103,5 +130,21 @@ export class Logger {
    */
   private getTimestamp(): string {
     return new Date().toISOString();
+  }
+  
+  /**
+   * Get the absolute path of the log file for this logger
+   * @returns Log file path
+   */
+  public getLogFilePath(): string {
+    return this.logFilePath;
+  }
+  
+  /**
+   * Check if this is an additional logger
+   * @returns True if this is an additional logger
+   */
+  public isSecondaryLogger(): boolean {
+    return this.isAdditionalLogger;
   }
 }

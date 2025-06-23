@@ -11,7 +11,7 @@ A professional-grade Twitter/X image scraper built with TypeScript and Playwrigh
 ### Core Capabilities
 - **Concurrent Profile Processing**: Process multiple Twitter profiles simultaneously for faster extraction
 - **Google Drive Integration**: Automatically upload images to custom folder structures
-- **Dual-Mode Logging**: Choose between concise progress bars or detailed verbose logs
+- **Advanced Logging System**: Dual-mode output with worker context, progress bars, and separate log files
 - **Robust Error Handling**: Comprehensive retry logic, rate limiting, and account status detection
 - **CLI Operation Modes**: Full mode, scrape-only, upload-only, debug-drive
 
@@ -181,6 +181,7 @@ MAX_CONCURRENT_UPLOADS=3
 LOG_MODE=concise                # 'concise' | 'verbose'
 SHOW_PROGRESS_BARS=true
 LOG_TO_FILE=true
+SEPARATE_LOG_FILES=true         # Creates separate verbose and concise log files
 
 # Google Drive Configuration
 GOOGLE_DRIVE_ENABLED=false
@@ -292,7 +293,26 @@ The scraper implements several design patterns for maintainability and extensibi
 - **Google API Permissions**: Use the principle of least privilege for service accounts
 - **File Access**: Be aware of file permissions when downloading media
 
-## 📝 License
+## � Advanced Logging System
+
+The project incorporates a sophisticated logging architecture designed specifically for concurrent operations:
+
+### Features
+
+- **Dual-Mode Output**: Choose between concise (progress bars) or verbose (detailed logs) modes
+- **Worker Context Logging**: All logs include worker identification (`[Worker#1:@username]`)
+- **Progress Bars**:
+  - Scrolling: `███████████░░░░░░░ | Scrolling @user1 | 15/50 | 30% | ETA: 15s`
+  - Download: `████████████████░░░ | Download @user2 | 25/30 | 83% | ETA: 5s`
+  - Upload: `██████░░░░░░░░░░░░░░░ | Upload @user1 B1 | 6/20 | 30% | ETA: 45s`
+- **Dual-File Logging**: Separate log files for concise and verbose information:
+  - `logs/scraper-${timestamp}.log`: Detailed debug logs
+  - `logs/scraper-${timestamp}-concise.log`: Progress summaries
+- **Thread-Safe Console Output**: Uses `ConsoleMutex` to prevent progress bar corruption
+
+See the [Advanced Logging Documentation](docs/ADVANCED_LOGGING.md) for complete details.
+
+## �📝 License
 
 This project is licensed under the ISC License.
 

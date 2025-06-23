@@ -17,8 +17,10 @@
     "test:ui": "npx playwright test --ui",
     "test:debug": "npx playwright test --debug",
     "test:headed": "npx playwright test --headed",
+    "test:logging": "ts-node src/demo/advancedLoggingCodeExample.ts",
     "dev": "ts-node-dev --respawn src/index.ts",
-    "demo:logger": "ts-node src/demo/progressLoggerDemo.ts"
+    "demo:logger": "ts-node src/demo/progressLoggerDemo.ts",
+    "demo:advancedLogger": "ts-node src/demo/advancedLoggingDemo.ts"
   },
   "keywords": [],
   "author": "",

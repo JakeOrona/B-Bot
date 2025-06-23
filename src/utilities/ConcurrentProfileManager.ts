@@ -219,13 +219,14 @@ export class ConcurrentProfileManager extends EventEmitter {
         // Create new page for this worker
         const page = await this.context.newPage();
         
-        // Create extraction worker
+        // Create extraction worker with worker ID
         const worker = new ExtractionWorker(
           page,
           this.context,
           this.browser,
           this.config,
-          this.profileQueue
+          this.profileQueue,
+          i + 1 // Worker ID (1-based for better user readability)
         );
         
         this.workers.push(worker);

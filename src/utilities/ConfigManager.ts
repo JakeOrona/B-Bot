@@ -9,7 +9,7 @@ import fs from 'fs';
 import path from 'path';
 import dotenv from 'dotenv';
 import { AuthCredentials, ScraperConfig, ScraperError, ScraperErrorType } from '../interfaces/ScraperTypes';
-import { ProgressConfig } from './ProgressLogger';
+import { AdvancedProgressConfig, ProgressConfig } from './ProgressLogger';
 
 export class ConfigManager {
   private static instance: ConfigManager;
@@ -159,7 +159,12 @@ export class ConfigManager {
         '# Logging Configuration\n' +
         'LOG_MODE=concise\n' +      // 'concise' | 'verbose'
         'SHOW_PROGRESS_BARS=true\n' +
-        'LOG_TO_FILE=true\n\n' +
+        'LOG_TO_FILE=true\n' +
+        'SEPARATE_LOG_FILES=true\n\n' +
+        '# Advanced Logging Configuration\n' +
+        'ENABLE_GROUPED_BARS=true\n' +
+        'LOG_BUFFER_SIZE=8\n' +
+        'LOG_REFRESH_INTERVAL=100\n\n' +
         '# Google Drive Configuration\n' +
         'GOOGLE_DRIVE_ENABLED=false\n' +
         'GOOGLE_DRIVE_CREDENTIALS_PATH=config/google-service-account.json\n' +
@@ -188,13 +193,20 @@ export class ConfigManager {
 
   /**
    * Get progress logger configuration from environment variables
-   * @returns Progress logger configuration
+   * @returns Progress logger configuration with advanced options
    */
-  public getProgressConfig(): ProgressConfig {
+  public getProgressConfig(): ProgressConfig & Partial<AdvancedProgressConfig> {
     return {
+      // Basic configuration
       logMode: (process.env.LOG_MODE as 'concise' | 'verbose') || 'concise',
       showProgressBars: process.env.SHOW_PROGRESS_BARS !== 'false',
-      logToFile: process.env.LOG_TO_FILE !== 'false'
+      logToFile: process.env.LOG_TO_FILE !== 'false',
+      separateLogFiles: process.env.SEPARATE_LOG_FILES === 'true',
+      
+      // Advanced configuration
+      bufferSize: parseInt(process.env.LOG_BUFFER_SIZE || '8', 10),
+      refreshInterval: parseInt(process.env.LOG_REFRESH_INTERVAL || '100', 10),
+      enableGroupedBars: process.env.ENABLE_GROUPED_BARS !== 'false'
     };
   }
   

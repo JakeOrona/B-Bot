@@ -8,6 +8,7 @@ import { ProfileQueue } from './ProfileQueue';
 import { ExtractionResult, ExtractionWorkerInterface, ProfileStatus } from '../interfaces/ConcurrentTypes';
 import { ScraperConfig, ScraperError, ScraperErrorType } from '../interfaces/ScraperTypes';
 import { Logger } from './Logger';
+import { ProgressLogger } from './ProgressLogger';
 import { Semaphore } from './Semaphore';
 
 export class ExtractionWorker implements ExtractionWorkerInterface {
@@ -18,8 +19,11 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
   private profileQueue: ProfileQueue;
   private isRunning: boolean = false;
   private logger: Logger;
+  private progressLogger: ProgressLogger;
   private twitterScraper: TwitterScraper;
   private currentProfile: string | null = null;
+  private workerId: number = 0;
+  private workerContext: { workerId: number; username?: string } = { workerId: 0 };
 
   /**
    * Constructor
@@ -34,14 +38,18 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
     context: BrowserContext,
     browser: Browser,
     config: ScraperConfig,
-    profileQueue: ProfileQueue
+    profileQueue: ProfileQueue,
+    workerId: number = 0
   ) {
     this.page = page;
     this.context = context;
     this.browser = browser;
     this.config = config;
     this.profileQueue = profileQueue;
+    this.workerId = workerId;
+    this.workerContext = { workerId: this.workerId };
     this.logger = Logger.getInstance();
+    this.progressLogger = ProgressLogger.getInstance();
     this.twitterScraper = new TwitterScraper(
       page,
       context,
@@ -77,7 +85,7 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
         
         if (!profile) {
           // No more profiles to process
-          this.logger.info('No more profiles to extract, worker pausing');
+          await this.progressLogger.info('No more profiles to extract, worker pausing', undefined, undefined, this.workerContext);
           
           // Use shorter wait time to check more frequently
           await new Promise(resolve => setTimeout(resolve, 500));
@@ -87,7 +95,7 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
           
           // Log status periodically
           if (noProfilesFoundCount % 3 === 0) {
-            this.logger.info(`Worker waiting: ${JSON.stringify(stats)} (idle count: ${noProfilesFoundCount})`);
+            await this.progressLogger.info(`Worker waiting: ${JSON.stringify(stats)} (idle count: ${noProfilesFoundCount})`, undefined, undefined, this.workerContext);
           }
           
           if (stats.waiting === 0 && stats.extracting === 0) {
@@ -96,7 +104,7 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
             // If we've checked multiple times and found no profiles to process,
             // assume we're done and exit the loop
             if (noProfilesFoundCount >= MAX_EMPTY_ITERATIONS) {
-              this.logger.info(`No profiles to extract after ${MAX_EMPTY_ITERATIONS} checks, worker exiting`);
+              await this.progressLogger.info(`No profiles to extract after ${MAX_EMPTY_ITERATIONS} checks, worker exiting`, undefined, undefined, this.workerContext);
               break;
             }
           } else {
@@ -107,7 +115,10 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
         }
         
         this.currentProfile = profile.username;
-        this.logger.info(`Worker starting extraction for profile @${profile.username}`);
+        // Update worker context with current username
+        this.workerContext = { workerId: this.workerId, username: profile.username };
+        
+        await this.progressLogger.info(`Worker starting extraction for profile @${profile.username}`, undefined, undefined, this.workerContext);
         
         // Update profile status
         this.profileQueue.updateProfileStatus(profile.username, ProfileStatus.EXTRACTING);
@@ -123,7 +134,7 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
               ProfileStatus.DOWNLOADING, 
               { imageData: extractionResult.imageData }
             );
-            this.logger.info(`Extraction successful for @${profile.username}: Found ${extractionResult.imageData.length} images`);
+            await this.progressLogger.success(`Extraction successful for @${profile.username}: Found ${extractionResult.imageData.length} images`, undefined, this.workerContext);
           } else {
             // No images found, mark as completed
             this.profileQueue.updateProfileStatus(
@@ -131,10 +142,10 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
               ProfileStatus.COMPLETED, 
               { imageData: [] }
             );
-            this.logger.warn(`No images found for @${profile.username}`);
+            await this.progressLogger.warn(`No images found for @${profile.username}`, this.workerContext);
           }
         } catch (error) {
-          this.logger.error(`Error extracting profile @${profile.username}`, error as Error);
+          await this.progressLogger.error(`Error extracting profile @${profile.username}`, error as Error, undefined, this.workerContext);
           
           // Mark profile as failed
           this.profileQueue.updateProfileStatus(
@@ -150,7 +161,7 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
         }
       }
     } catch (error) {
-      this.logger.error('Extraction worker encountered an error', error as Error);
+      await this.progressLogger.error('Extraction worker encountered an error', error as Error, undefined, this.workerContext);
       this.isRunning = false;
     }
   }
@@ -180,8 +191,8 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
         );
       }
       
-      // Scroll and load media
-      await this.twitterScraper.scrollAndLoadMedia();
+      // Scroll and load media with worker context
+      await this.twitterScraper.scrollAndLoadMedia(this.config.maxScrolls, this.workerContext);
       
       // Extract image URLs
       const imageData = await this.twitterScraper.extractImageUrls();
@@ -205,6 +216,6 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
    */
   public async stop(): Promise<void> {
     this.isRunning = false;
-    this.logger.info(`Extraction worker stopping, current profile: ${this.currentProfile || 'none'}`);
+    await this.progressLogger.info(`Extraction worker stopping, current profile: ${this.currentProfile || 'none'}`, undefined, undefined, this.workerContext);
   }
 }

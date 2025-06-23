@@ -135,13 +135,33 @@ export class TwitterScraper extends BasePage {
    * @param maxScrolls Maximum number of scrolls to perform
    * @returns Number of images found
    */
-  public async scrollAndLoadMedia(maxScrolls: number = this.config.maxScrolls): Promise<number> {
+  public async scrollAndLoadMedia(
+    maxScrolls: number = this.config.maxScrolls,
+    workerContext?: { workerId?: number; username?: string }
+  ): Promise<number> {
     try {
       let previousHeight = 0;
       let scrollCount = 0;
       let sameHeightCount = 0;
+      const progressLogger = ProgressLogger.getInstance();
       
-      this.logger.info(`Starting to scroll and load media for ${this.currentUsername}`);
+      // Create a worker context object for logging
+      const context = workerContext || { username: this.currentUsername };
+      
+      // Create a unique scrolling progress bar ID
+      const scrollProgressId = `scroll-${context.username || this.currentUsername}`;
+      
+      // Log the start of scrolling
+      await progressLogger.info(`Starting to scroll and load media for @${this.currentUsername}`, undefined, undefined, context);
+      
+      // Create a scroll progress bar in concise mode
+      await progressLogger.createProgressBar(
+        scrollProgressId,
+        maxScrolls,
+        'Scrolling',
+        this.currentUsername,
+        context
+      );
       
       while (scrollCount < maxScrolls && sameHeightCount < 3) {
         // Get current scroll height
@@ -161,20 +181,29 @@ export class TwitterScraper extends BasePage {
         previousHeight = currentHeight;
         scrollCount++;
         
-        // Log progress
-        if (scrollCount % 5 === 0) {
-          this.logger.info(`Scrolled ${scrollCount}/${maxScrolls} times`);
-        }
+        // Update progress bar
+        await progressLogger.updateProgress(
+          scrollProgressId, 
+          scrollCount, 
+          undefined,
+          context
+        );
       }
       
       // Count the number of images found using updated selector for Twitter media images
       const imageCount = await this.page.evaluate(() => {
         const images = document.querySelectorAll('img[src*="pbs.twimg.com"]');
-        console.log(`Twitter media images found during scroll: ${images.length}`);
         return images.length;
       });
       
-      this.logger.info(`Found ${imageCount} images after scrolling ${scrollCount} times`);
+      // Complete the progress bar
+      await progressLogger.completeProgress(
+        scrollProgressId,
+        `Found ${imageCount} images after scrolling ${scrollCount} times for @${this.currentUsername}`,
+        context
+      );
+      
+      await progressLogger.success(`Found ${imageCount} images after scrolling ${scrollCount} times for @${this.currentUsername}`, undefined, context);
       return imageCount;
     } catch (error) {
       throw new ScraperError(
