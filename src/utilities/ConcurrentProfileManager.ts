@@ -110,23 +110,57 @@ export class ConcurrentProfileManager extends EventEmitter {
       
     }, HARD_TIMEOUT_MS);
     
-    // Add status tracking to detect stuck processing
+    // Enhanced status tracking to detect and recover from deadlocks
     let lastQueueStats = this.profileQueue.getStats();
     let unchangedStatsCount = 0;
-    const MAX_UNCHANGED_STATS = 5;
+    const MAX_UNCHANGED_STATS = 3; // Detect deadlocks more quickly
+    let deadlockDetected = false;
     
     const statusCheckInterval = setInterval(() => {
       const currentStats = this.profileQueue.getStats();
       this.logger.info(`Processing status: ${JSON.stringify(currentStats)}`);
       
       // Check if stats are unchanged (possible deadlock)
-      if (JSON.stringify(currentStats) === JSON.stringify(lastQueueStats)) {
+      if (JSON.stringify(currentStats) === JSON.stringify(lastQueueStats) && 
+         (currentStats.waiting > 0 || currentStats.extracting > 0)) {
+        
         unchangedStatsCount++;
+        
         if (unchangedStatsCount >= MAX_UNCHANGED_STATS) {
-          this.logger.warn(`Queue stats unchanged for ${MAX_UNCHANGED_STATS} checks, possible deadlock`);
+          if (!deadlockDetected) {
+            deadlockDetected = true;
+            this.logger.warn(`DEADLOCK DETECTED: Queue stats unchanged for ${MAX_UNCHANGED_STATS} checks`);
+            
+            // Log the current state of all profiles for debugging
+            const allProfiles = this.profileQueue.getAllProfiles();
+            this.logger.warn(`Current profile states: ${JSON.stringify(allProfiles.map(p => ({ 
+              username: p.username, 
+              status: p.status,
+              startTime: p.startTime ? new Date(p.startTime).toISOString() : undefined
+            })))}`);
+            
+            // Attempt recovery for profiles stuck in EXTRACTING status
+            const stuckProfiles = allProfiles.filter(p => 
+              p.status === ProfileStatus.EXTRACTING && 
+              p.startTime && 
+              (Date.now() - p.startTime > 60000) // Stuck for over 1 minute
+            );
+            
+            if (stuckProfiles.length > 0) {
+              this.logger.warn(`Attempting to recover ${stuckProfiles.length} stuck profiles`);
+              
+              // Reset stuck profiles to WAITING status
+              stuckProfiles.forEach(profile => {
+                this.logger.warn(`Resetting stuck profile @${profile.username} from EXTRACTING back to WAITING`);
+                this.profileQueue.updateProfileStatus(profile.username, ProfileStatus.WAITING);
+              });
+            }
+          }
         }
       } else {
+        // Reset counters if stats changed
         unchangedStatsCount = 0;
+        deadlockDetected = false;
         lastQueueStats = currentStats;
       }
       
@@ -137,6 +171,16 @@ export class ConcurrentProfileManager extends EventEmitter {
         this.logger.info(`All profiles processed (${currentStats.completed} completed, ${currentStats.failed} failed), stopping workers`);
         this.stopProcessing();
         clearInterval(statusCheckInterval);
+        clearTimeout(overallTimeout); // Clear the hard timeout since we're done
+      }
+      
+      // Additional check to detect if we have waiting profiles but no active extraction
+      // This might happen if all workers exit prematurely
+      if (currentStats.waiting > 0 && currentStats.extracting === 0 && this.workers.length === 0) {
+        this.logger.warn(`Detected ${currentStats.waiting} waiting profiles but no active workers, attempting to restart workers`);
+        this.initializeWorkers().catch(err => {
+          this.logger.error('Failed to restart workers', err as Error);
+        });
       }
     }, 10000); // Check every 10 seconds
     
@@ -214,8 +258,29 @@ export class ConcurrentProfileManager extends EventEmitter {
    */
   private async initializeWorkers(): Promise<void> {
     try {
+      // Validate queue state before worker startup
+      const queueStats = this.profileQueue.getStats();
+      
+      if (queueStats.total === 0) {
+        throw new Error('No profiles in queue. Cannot initialize workers with empty queue.');
+      }
+      
+      if (queueStats.waiting === 0) {
+        throw new Error('No waiting profiles in queue. All profiles may already be in process.');
+      }
+      
+      this.logger.info(`Initializing workers with queue state: ${JSON.stringify(queueStats)}`);
+      
+      // Create workers up to max concurrent profiles, but not more than waiting profiles
+      const numWorkersToCreate = Math.min(
+        this.concurrentConfig.maxConcurrentProfiles, 
+        queueStats.waiting
+      );
+      
+      this.logger.info(`Creating ${numWorkersToCreate} extraction workers`);
+      
       // Create workers up to max concurrent profiles
-      for (let i = 0; i < this.concurrentConfig.maxConcurrentProfiles; i++) {
+      for (let i = 0; i < numWorkersToCreate; i++) {
         // Create new page for this worker
         const page = await this.context.newPage();
         
@@ -231,7 +296,15 @@ export class ConcurrentProfileManager extends EventEmitter {
         
         this.workers.push(worker);
         this.logger.info(`Initialized extraction worker #${i + 1}`);
+        
+        // Small delay between worker creation to avoid race conditions
+        // when multiple workers start simultaneously
+        if (i < numWorkersToCreate - 1) {
+          await new Promise(resolve => setTimeout(resolve, 300));
+        }
       }
+      
+      this.logger.info(`All ${numWorkersToCreate} workers initialized successfully`);
     } catch (error) {
       this.logger.error('Error initializing extraction workers', error as Error);
       throw error;

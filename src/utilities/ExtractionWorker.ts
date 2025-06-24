@@ -80,48 +80,62 @@ export class ExtractionWorker implements ExtractionWorkerInterface {
         
         totalIterationCount++;
         
-        // Get next profile from queue
-        const profile = this.profileQueue.getNextWaitingProfile();
+        // Use a variable accessible to both try blocks
+        let profile;
         
-        if (!profile) {
-          // No more profiles to process
-          await this.progressLogger.info('No more profiles to extract, worker pausing', undefined, undefined, this.workerContext);
+        try {
+          // Attempt to atomically claim the next profile from queue
+          // The profile is already marked as EXTRACTING by getNextWaitingProfile
+          profile = this.profileQueue.getNextWaitingProfile();
           
-          // Use shorter wait time to check more frequently
-          await new Promise(resolve => setTimeout(resolve, 500));
-          
-          // Check if all profiles are done and exit loop if so
-          const stats = this.profileQueue.getStats();
-          
-          // Log status periodically
-          if (noProfilesFoundCount % 3 === 0) {
-            await this.progressLogger.info(`Worker waiting: ${JSON.stringify(stats)} (idle count: ${noProfilesFoundCount})`, undefined, undefined, this.workerContext);
-          }
-          
-          if (stats.waiting === 0 && stats.extracting === 0) {
-            noProfilesFoundCount++;
+          if (!profile) {
+            // No more profiles to process
+            await this.progressLogger.info('No waiting profiles available, worker pausing', undefined, undefined, this.workerContext);
             
-            // If we've checked multiple times and found no profiles to process,
-            // assume we're done and exit the loop
-            if (noProfilesFoundCount >= MAX_EMPTY_ITERATIONS) {
-              await this.progressLogger.info(`No profiles to extract after ${MAX_EMPTY_ITERATIONS} checks, worker exiting`, undefined, undefined, this.workerContext);
-              break;
+            // Use shorter wait time to check more frequently
+            await new Promise(resolve => setTimeout(resolve, 500));
+            
+            // Check if all profiles are done and exit loop if so
+            const stats = this.profileQueue.getStats();
+            
+            // Log status periodically
+            if (noProfilesFoundCount % 3 === 0) {
+              await this.progressLogger.info(`Worker #${this.workerId} waiting: ${JSON.stringify(stats)} (idle count: ${noProfilesFoundCount})`, undefined, undefined, this.workerContext);
             }
-          } else {
-            // Reset counter if there are still profiles being processed
-            noProfilesFoundCount = 0;
+            
+            if (stats.waiting === 0 && stats.extracting === 0) {
+              noProfilesFoundCount++;
+              
+              // If we've checked multiple times and found no profiles to process,
+              // assume we're done and exit the loop
+              if (noProfilesFoundCount >= MAX_EMPTY_ITERATIONS) {
+                await this.progressLogger.info(`No profiles to extract after ${MAX_EMPTY_ITERATIONS} checks, worker #${this.workerId} exiting`, undefined, undefined, this.workerContext);
+                break;
+              }
+            } else {
+              // Reset counter if there are still profiles being processed
+              noProfilesFoundCount = 0;
+            }
+            continue;
           }
+          
+          // Successfully claimed a profile - update worker state
+          this.currentProfile = profile.username;
+          // Update worker context with current username
+          this.workerContext = { workerId: this.workerId, username: profile.username };
+          
+          await this.progressLogger.info(`Worker #${this.workerId} claimed and starting extraction for profile @${profile.username}`, undefined, undefined, this.workerContext);
+          
+          // No need to update profile status again, as it was already set to EXTRACTING
+          // in the atomic getNextWaitingProfile operation
+        } catch (profileError) {
+          // Error in profile claiming process
+          await this.progressLogger.error(`Error claiming next profile for worker #${this.workerId}`, profileError as Error, undefined, this.workerContext);
+          
+          // Short delay before trying again
+          await new Promise(resolve => setTimeout(resolve, 1000));
           continue;
         }
-        
-        this.currentProfile = profile.username;
-        // Update worker context with current username
-        this.workerContext = { workerId: this.workerId, username: profile.username };
-        
-        await this.progressLogger.info(`Worker starting extraction for profile @${profile.username}`, undefined, undefined, this.workerContext);
-        
-        // Update profile status
-        this.profileQueue.updateProfileStatus(profile.username, ProfileStatus.EXTRACTING);
         
         try {
           // Extract image URLs

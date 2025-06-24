@@ -60,11 +60,36 @@ export class ProfileQueue extends EventEmitter {
   }
 
   /**
-   * Get the next waiting profile from the queue
+   * Get the next waiting profile from the queue and atomically mark it as EXTRACTING
+   * This prevents race conditions where multiple workers claim the same profile
    * @returns The next profile or undefined if no profiles are waiting
    */
   public getNextWaitingProfile(): ProfileQueueItem | undefined {
-    return this.queue.find(item => item.status === ProfileStatus.WAITING);
+    // Use atomic find-and-update pattern to prevent race condition
+    const index = this.queue.findIndex(item => item.status === ProfileStatus.WAITING);
+    
+    if (index === -1) {
+      return undefined; // No waiting profiles
+    }
+    
+    // Immediately mark as EXTRACTING to prevent other workers from claiming it
+    const profile = this.queue[index];
+    
+    // Update the profile status in place
+    this.queue[index] = {
+      ...profile,
+      status: ProfileStatus.EXTRACTING,
+      startTime: Date.now()
+    };
+    
+    // Log the atomic claim operation
+    this.logger.info(`Profile @${profile.username} atomically claimed and marked as EXTRACTING`);
+    
+    // Emit event for status change
+    this.emit(ConcurrentProfileEvent.PROFILE_CLAIMED, this.queue[index]);
+    
+    // Return a copy of the updated item
+    return { ...this.queue[index] };
   }
 
   /**
