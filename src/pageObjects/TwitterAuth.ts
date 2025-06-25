@@ -10,8 +10,38 @@ import path from 'path';
 
 export class TwitterAuth extends BasePage {
   private readonly loginUrl: string = 'https://x.com/login';
-  private readonly cookiesPath: string = path.join(process.cwd(), 'config', 'twitter_cookies.json');
-  
+  private static readonly storageStatePath: string = path.join(process.cwd(), 'config', 'auth-state.json');
+
+  /**
+   * Static helper to create a context with persisted auth state if available
+   */
+  public static async createContextWithAuthState(browser: Browser, logger: any): Promise<BrowserContext> {
+    try {
+      if (fs.existsSync(TwitterAuth.storageStatePath)) {
+        logger.info('Loading saved authentication state...');
+        return await browser.newContext({ storageState: TwitterAuth.storageStatePath });
+      } else {
+        logger.info('No saved authentication state found. Creating new context.');
+        return await browser.newContext();
+      }
+    } catch (err) {
+      logger.error(`Failed to load auth state: ${err}. Falling back to new context.`);
+      return await browser.newContext();
+    }
+  }
+
+  /**
+   * Save the current context's storage state
+   */
+  public static async saveAuthState(context: BrowserContext, logger: any): Promise<void> {
+    try {
+      await context.storageState({ path: TwitterAuth.storageStatePath });
+      logger.info('Authentication state saved successfully.');
+    } catch (err) {
+      logger.error(`Failed to save authentication state: ${err}`);
+    }
+  }
+
   /**
    * Constructor for TwitterAuth
    * @param page Playwright Page instance
@@ -54,83 +84,21 @@ export class TwitterAuth extends BasePage {
    */
   public async login(credentials: AuthCredentials): Promise<void> {
     try {
-      // First check if we can use saved cookies
-      if (await this.loadCookies()) {
-        this.logger.info('Cookies loaded, verifying login state...');
-        
-        // Verify login was successful with our improved multi-step verification
-        if (await this.verifyLoggedIn()) {
-          this.logger.success('Successfully logged in with saved cookies');
-          return;
-        } else {
-          this.logger.warn('Cookie-based login verification failed, proceeding with full login');
-        }
+      // Check if already logged in (validate state)
+      if (await this.verifyLoggedIn()) {
+        this.logger.success('Already logged in with persisted authentication state.');
+        return;
       }
-      
-      // If cookies didn't work, do a full login
+      this.logger.info('Performing full login flow...');
       await this.performFullLogin(credentials);
-      
-      // Save cookies for future use
-      await this.saveCookies();
+      // Save storage state after successful login
+      await TwitterAuth.saveAuthState(this.context, this.logger);
     } catch (error) {
       this.logger.error('Login failed', error as Error, ScraperErrorType.AUTHENTICATION_ERROR);
       throw new ScraperError(
         `Failed to log in to Twitter: ${(error as Error).message}`,
         ScraperErrorType.AUTHENTICATION_ERROR
       );
-    }
-  }
-  
-  /**
-   * Load saved cookies if available
-   * @returns true if cookies were loaded successfully
-   */
-  private async loadCookies(): Promise<boolean> {
-    try {
-      if (!fs.existsSync(this.cookiesPath)) {
-        this.logger.info('No saved cookies found');
-        return false;
-      }
-      
-      const cookiesString = fs.readFileSync(this.cookiesPath, 'utf8');
-      const cookies = JSON.parse(cookiesString);
-      
-      if (!Array.isArray(cookies) || cookies.length === 0) {
-        this.logger.info('Invalid or empty cookies file');
-        return false;
-      }
-      
-      await this.context.addCookies(cookies);
-      this.logger.info('Loaded saved cookies');
-      
-      // Navigate to Twitter homepage to verify cookies
-      await this.navigateWithRetry('https://x.com/home');
-      
-      return true;
-    } catch (error) {
-      this.logger.warn(`Error loading cookies: ${(error as Error).message}`);
-      return false;
-    }
-  }
-  
-  /**
-   * Save current cookies for future use
-   */
-  private async saveCookies(): Promise<void> {
-    try {
-      const cookies = await this.context.cookies();
-      const cookiesString = JSON.stringify(cookies, null, 2);
-      
-      // Ensure the directory exists
-      const cookiesDir = path.dirname(this.cookiesPath);
-      if (!fs.existsSync(cookiesDir)) {
-        fs.mkdirSync(cookiesDir, { recursive: true });
-      }
-      
-      fs.writeFileSync(this.cookiesPath, cookiesString);
-      this.logger.info('Saved cookies for future use');
-    } catch (error) {
-      this.logger.warn(`Failed to save cookies: ${(error as Error).message}`);
     }
   }
   
@@ -318,6 +286,20 @@ export class TwitterAuth extends BasePage {
   }
   
   /**
+   * Remove saved authentication state (logout)
+   */
+  public static removeAuthState(logger: any): void {
+    try {
+      if (fs.existsSync(TwitterAuth.storageStatePath)) {
+        fs.unlinkSync(TwitterAuth.storageStatePath);
+        logger.info('Removed saved authentication state.');
+      }
+    } catch (error) {
+      logger.warn(`Failed to remove auth state file: ${(error as Error).message}`);
+    }
+  }
+  
+  /**
    * Logout from Twitter
    */
   public async logout(): Promise<void> {
@@ -337,17 +319,8 @@ export class TwitterAuth extends BasePage {
       this.logger.info('Successfully logged out from Twitter');
     } catch (error) {
       this.logger.warn(`Logout failed: ${(error as Error).message}`);
-      // Even if logout fails, we'll delete the cookies
     }
-    
-    // Delete saved cookies
-    try {
-      if (fs.existsSync(this.cookiesPath)) {
-        fs.unlinkSync(this.cookiesPath);
-        this.logger.info('Removed saved cookies');
-      }
-    } catch (error) {
-      this.logger.warn(`Failed to remove cookies file: ${(error as Error).message}`);
-    }
+    // Remove saved auth state
+    TwitterAuth.removeAuthState(this.logger);
   }
 }

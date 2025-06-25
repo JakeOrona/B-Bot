@@ -15,6 +15,7 @@ build/
 .env.test.local
 .env.production.local
 /config/twitterartscraper-1afd4fab9c21.json
+/config/auth-state.json
 
 # Playwright
 /test-results/
