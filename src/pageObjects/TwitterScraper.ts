@@ -4,8 +4,8 @@
 
 import { Browser, BrowserContext, Page } from 'playwright';
 import { BasePage } from './BasePage';
-import { ImageData, ScraperConfig, ScraperError, ScraperErrorType } from '../interfaces/ScraperTypes';
-import { ImageDownloader } from '../utilities/ImageDownloader';
+import { ImageData, ScraperConfig, ScraperError, ScraperErrorType, MediaData, MediaType } from '../interfaces/ScraperTypes';
+import { MediaDownloader } from '../utilities/MediaDownloader';
 import { GoogleDriveUploader } from '../utilities/GoogleDriveUploader';
 import { FileCleanup } from '../utilities/FileCleanup';
 import fs from 'fs';
@@ -13,10 +13,10 @@ import path from 'path';
 
 export class TwitterScraper extends BasePage {
   private config: ScraperConfig;
-  private imageDownloader: ImageDownloader;
+  private mediaDownloader: MediaDownloader;
   private googleDriveUploader?: GoogleDriveUploader;
   private currentUsername: string = '';
-  private downloadedImagePaths: string[] = [];
+  private downloadedMediaPaths: string[] = [];
   private workerId?: number;
   private contextArtist?: string;
   
@@ -35,7 +35,7 @@ export class TwitterScraper extends BasePage {
   ) {
     super(page, context, browser);
     this.config = config;
-    this.imageDownloader = new ImageDownloader(config.downloadPath);
+    this.mediaDownloader = new MediaDownloader(config.downloadPath);
     
     // Initialize Google Drive uploader if enabled
     if (config.googleDrive?.enableUpload && config.googleDrive?.rootFolderId) {
@@ -170,25 +170,30 @@ export class TwitterScraper extends BasePage {
           );
       }
   }
-  
+
   /**
-   * Extract image URLs from the current page
-   * @returns Array of image data objects
+   * Extract media URLs from the current page (images, videos, GIFs)
+   * @returns Array of media data objects
    */
-  public async extractImageUrls(): Promise<ImageData[]> {
+  public async extractMediaUrls(): Promise<MediaData[]> {
     try {
-      this.logger.info(`Extracting image URLs from ${this.currentUsername}'s media`);
+      this.logger.info(`Extracting media URLs from ${this.currentUsername}'s media`);
       
       // For complex operations like this where we need to extract data from the DOM,
       // we need to use page.evaluate to perform DOM manipulation directly
-      const imageData = await this.page.evaluate((username) => {
-        const images: {url: string, tweetId: string, username: string, index: number}[] = [];
+      const mediaData = await this.page.evaluate((username) => {
+        const media: {url: string, tweetId: string, username: string, index: number, mediaType: string}[] = [];
         
         // Debug: Log what we're finding
         const allImages = document.querySelectorAll('img');
+        const allVideos = document.querySelectorAll('video');
         const twitterImages = document.querySelectorAll('img[src*="pbs.twimg.com"]');
+        const twitterVideos = document.querySelectorAll('video[src*="video.twimg.com"], video source[src*="video.twimg.com"]');
+        
         console.log(`Total images found: ${allImages.length}`);
+        console.log(`Total videos found: ${allVideos.length}`);
         console.log(`Twitter media images found: ${twitterImages.length}`);
+        console.log(`Twitter media videos found: ${twitterVideos.length}`);
         
         // Try multiple selectors for tweet containers
         const tweetSelectors = [
@@ -208,25 +213,62 @@ export class TwitterScraper extends BasePage {
         }
         
         if (tweets.length === 0) {
-            console.log('No tweet containers found. Falling back to direct image extraction.');
-            // If we can't find tweet containers, extract images directly
+            console.log('No tweet containers found. Falling back to direct media extraction.');
+            
+            // Extract images directly
             const directImages = document.querySelectorAll('img[src*="pbs.twimg.com"]');
             Array.from(directImages).forEach((img, index) => {
-                const src = (img as Element).getAttribute('src');
+                const src = (img as HTMLImageElement).getAttribute('src');
                 if (!src) return;
+                
+                // Determine if this is a GIF or regular image
+                const isGif = src.includes('format=gif') || src.includes('.gif') || 
+                              (img as HTMLImageElement).alt?.toLowerCase().includes('gif');
                 
                 // Get the largest version of the image by modifying the URL
                 const originalUrl = src.replace(/[&?]name=\w+/, '&name=orig');
                 
-                images.push({
+                media.push({
                     url: originalUrl,
-                    tweetId: `unknown-${Date.now()}-${index}`, // Generate fallback ID
+                    tweetId: `unknown-${Date.now()}-${index}`,
                     username,
-                    index
+                    index,
+                    mediaType: isGif ? 'gif' : 'image'
                 });
             });
             
-            return images;
+            // Extract videos directly
+            const directVideos = document.querySelectorAll('video');
+            Array.from(directVideos).forEach((video, index) => {
+                // Try to get video source from different attributes
+                let videoUrl = (video as HTMLVideoElement).src;
+                
+                if (!videoUrl) {
+                    // Check source elements within video
+                    const sourceElement = video.querySelector('source');
+                    if (sourceElement) {
+                        videoUrl = sourceElement.getAttribute('src') || '';
+                    }
+                }
+                
+                if (!videoUrl) {
+                    // Check data attributes that might contain video URL
+                    videoUrl = (video as HTMLElement).getAttribute('data-src') || 
+                              (video as HTMLElement).getAttribute('data-video-url') || '';
+                }
+                
+                if (videoUrl && (videoUrl.includes('video.twimg.com') || videoUrl.includes('pbs.twimg.com'))) {
+                    media.push({
+                        url: videoUrl,
+                        tweetId: `video-unknown-${Date.now()}-${index}`,
+                        username,
+                        index: media.length,
+                        mediaType: 'video'
+                    });
+                }
+            });
+            
+            return media;
         }
         
         // Process each found tweet
@@ -249,7 +291,7 @@ export class TwitterScraper extends BasePage {
                     if (match) {
                         tweetId = match[1];
                         break;
-                      }
+                    }
                 }
             }
             
@@ -258,73 +300,189 @@ export class TwitterScraper extends BasePage {
                 tweetId = `tweet-${tweetIndex}-${Date.now()}`;
             }
             
-            // Get all image elements in the tweet using improved selector
+            let mediaIndex = 0;
+            
+            // Extract images from the tweet
             const imageElements = tweet.querySelectorAll('img[src*="pbs.twimg.com"]');
-            
-            if (imageElements.length === 0) {
-                console.log(`No images found in tweet ${tweetId} using improved selector`);
-            }
-            
-            // Extract image URLs
-            Array.from(imageElements).forEach((img, index) => {
-                const src = (img as Element).getAttribute('src');
+            Array.from(imageElements).forEach((img) => {
+                const src = (img as HTMLImageElement).getAttribute('src');
                 if (!src) return;
                 
-                // Get the largest version of the image by modifying the URL
-                // Handle both formats: ?name=small and &name=small
+                // Determine if this is a GIF or regular image
+                const isGif = src.includes('format=gif') || src.includes('.gif') || 
+                              (img as HTMLImageElement).alt?.toLowerCase().includes('gif');
+                
+                // Get the largest version by modifying the URL
                 const originalUrl = src.replace(/[&?]name=\w+/, '&name=orig');
                 
-                images.push({
+                media.push({
                     url: originalUrl,
                     tweetId,
                     username,
-                    index
+                    index: mediaIndex++,
+                    mediaType: isGif ? 'gif' : 'image'
                 });
+            });
+            
+            // Extract videos from the tweet
+            const videoElements = tweet.querySelectorAll('video');
+            Array.from(videoElements).forEach((video) => {
+                // Try to get video source from different attributes
+                let videoUrl = (video as HTMLVideoElement).src;
+                
+                if (!videoUrl) {
+                    // Check source elements within video
+                    const sourceElement = video.querySelector('source');
+                    if (sourceElement) {
+                        videoUrl = sourceElement.getAttribute('src') || '';
+                    }
+                }
+                
+                if (!videoUrl) {
+                    // Check data attributes
+                    videoUrl = (video as HTMLElement).getAttribute('data-src') || 
+                              (video as HTMLElement).getAttribute('data-video-url') || '';
+                }
+                
+                // Also check for video containers that might have data attributes
+                if (!videoUrl) {
+                    const videoContainer = video.closest('[data-testid*="video"]') || 
+                                          video.closest('.video-container') ||
+                                          video.closest('[role="presentation"]');
+                    if (videoContainer) {
+                        videoUrl = (videoContainer as HTMLElement).getAttribute('data-video-url') || 
+                                  (videoContainer as HTMLElement).getAttribute('data-src') || '';
+                    }
+                }
+                
+                if (videoUrl && (videoUrl.includes('video.twimg.com') || videoUrl.includes('pbs.twimg.com'))) {
+                    // Try to get the highest quality version
+                    const highQualityUrl = videoUrl.replace(/\/\d+x\d+\//, '/1920x1080/');
+                    
+                    media.push({
+                        url: highQualityUrl || videoUrl,
+                        tweetId,
+                        username,
+                        index: mediaIndex++,
+                        mediaType: 'video'
+                    });
+                }
+            });
+            
+            // Look for GIF containers that might be displayed as videos
+            const gifContainers = tweet.querySelectorAll('[data-testid*="gif"]');
+            Array.from(gifContainers).forEach((container) => {
+                // Check for video elements within GIF containers
+                const gifVideo = container.querySelector('video');
+                if (gifVideo) {
+                    let gifUrl = (gifVideo as HTMLVideoElement).src;
+                    
+                    if (!gifUrl) {
+                        const sourceElement = gifVideo.querySelector('source');
+                        if (sourceElement) {
+                            gifUrl = sourceElement.getAttribute('src') || '';
+                        }
+                    }
+                    
+                    if (gifUrl) {
+                        media.push({
+                            url: gifUrl,
+                            tweetId,
+                            username,
+                            index: mediaIndex++,
+                            mediaType: 'gif'
+                        });
+                    }
+                }
             });
         });
         
-        return images;
+        return media;
       }, this.currentUsername);
       
-      this.logger.info(`Extracted ${imageData.length} image URLs from ${this.currentUsername}'s media`);
-      return imageData;
+      // Convert string mediaType back to enum
+      const typedMediaData: MediaData[] = mediaData.map(item => ({
+        ...item,
+        mediaType: item.mediaType as MediaType
+      }));
+      
+      this.logger.info(`Extracted ${typedMediaData.length} media items from ${this.currentUsername}'s media`);
+      
+      // Log breakdown by type
+      const breakdown = typedMediaData.reduce((acc, item) => {
+        acc[item.mediaType] = (acc[item.mediaType] || 0) + 1;
+        return acc;
+      }, {} as Record<string, number>);
+      
+      this.logger.info(`Media breakdown: ${JSON.stringify(breakdown)}`);
+      
+      return typedMediaData;
     } catch (error) {
       throw new ScraperError(
-        `Failed to extract image URLs: ${(error as Error).message}`,
+        `Failed to extract media URLs: ${(error as Error).message}`,
         ScraperErrorType.SCRAPING_ERROR
       );
     }
   }
-  
+
   /**
-   * Download extracted images
-   * @param imageDataList Array of image data to download
-   * @param username Twitter username
-   * @returns Object containing download statistics
+   * Backward compatibility method for image URL extraction
+   * DEPRECATED: Use extractMediaUrls instead
    */
-  public async downloadImages(imageDataList: ImageData[]): Promise<{
+  public async extractImageUrls(): Promise<MediaData[]> {
+    const allMedia = await this.extractMediaUrls();
+    // Filter to only return images for backward compatibility
+    return allMedia.filter(item => item.mediaType === MediaType.IMAGE);
+  }
+
+/**
+   * Download extracted media (images, videos, GIFs)
+   * @param mediaDataList Array of media data to download
+   * @param username Twitter username
+   * @returns Object containing download statistics and paths
+   */
+  public async downloadMedia(mediaDataList: MediaData[]): Promise<{
     stats: {
       successful: number;
       failed: number;
       skipped: number;
       total: number;
+      byType: {
+        images: number;
+        videos: number;
+        gifs: number;
+      };
     };
     downloadedPaths: string[];
   }> {
-    if (imageDataList.length === 0) {
-      this.logger.warn(`No images to download for ${this.currentUsername}`);
+    if (mediaDataList.length === 0) {
+      this.logger.warn(`No media to download for ${this.currentUsername}`);
       return { 
-        stats: { successful: 0, failed: 0, skipped: 0, total: 0 },
+        stats: { 
+          successful: 0, 
+          failed: 0, 
+          skipped: 0, 
+          total: 0,
+          byType: { images: 0, videos: 0, gifs: 0 }
+        },
         downloadedPaths: []
       };
     }
     
-    this.logger.info(`Starting download of ${imageDataList.length} images for ${this.currentUsername}`);
+    this.logger.info(`Starting download of ${mediaDataList.length} media items for ${this.currentUsername}`);
     
-    // Log sample of found image URLs for debugging
-    if (imageDataList.length > 0) {
-      const sampleUrl = imageDataList[0].url;
-      this.logger.info(`Sample image URL: ${sampleUrl}`);
+    // Log breakdown by media type
+    const typeBreakdown = mediaDataList.reduce((acc, item) => {
+      acc[item.mediaType] = (acc[item.mediaType] || 0) + 1;
+      return acc;
+    }, {} as Record<string, number>);
+    
+    this.logger.info(`Media breakdown to download: ${JSON.stringify(typeBreakdown)}`);
+    
+    // Log sample of found media URLs for debugging
+    if (mediaDataList.length > 0) {
+      const sampleMedia = mediaDataList[0];
+      this.logger.info(`Sample ${sampleMedia.mediaType} URL: ${sampleMedia.url}`);
     }
     
     // Create user-specific directory if it doesn't exist
@@ -334,34 +492,40 @@ export class TwitterScraper extends BasePage {
     }
     
     // Reset the downloaded paths array for this batch
-    this.downloadedImagePaths = [];
+    this.downloadedMediaPaths = [];
     
-    // Download each image with rate limiting
+    // Download each media file with rate limiting
     let successful = 0;
     let failed = 0;
     let skipped = 0;
+    const byType = { images: 0, videos: 0, gifs: 0 };
     
-    for (let i = 0; i < imageDataList.length; i++) {
-      const imageData = imageDataList[i];
+    for (let i = 0; i < mediaDataList.length; i++) {
+      const mediaData = mediaDataList[i];
       
       try {
-        // Download the image and get the local path
-        const localPath = await this.imageDownloader.downloadImage(imageData);
+        // Download the media and get the local path
+        const localPath = await this.mediaDownloader.downloadMedia(mediaData);
         successful++;
+        
+        // Track by type for successful downloads
+        if (mediaData.mediaType === MediaType.IMAGE) byType.images++;
+        else if (mediaData.mediaType === MediaType.VIDEO) byType.videos++;
+        else if (mediaData.mediaType === MediaType.GIF) byType.gifs++;
         
         // Track downloaded path for later batch upload
         if (localPath) {
-          this.downloadedImagePaths.push(localPath);
+          this.downloadedMediaPaths.push(localPath);
         }
         
         // Log progress periodically
-        if (successful % 10 === 0 || successful === imageDataList.length) {
-          this.logger.info(`Downloaded ${successful}/${imageDataList.length} images for ${this.currentUsername}`);
+        if (successful % 10 === 0 || successful === mediaDataList.length) {
+          this.logger.info(`Downloaded ${successful}/${mediaDataList.length} media items for ${this.currentUsername}`);
         }
       } catch (error) {
         if ((error as ScraperError).type === ScraperErrorType.DOWNLOAD_ERROR) {
           failed++;
-          this.logger.error(`Failed to download image ${i + 1}/${imageDataList.length}`, error as Error);
+          this.logger.error(`Failed to download ${mediaData.mediaType} ${i + 1}/${mediaDataList.length}`, error as Error);
         } else {
           // If it was skipped due to existing file
           skipped++;
@@ -369,22 +533,33 @@ export class TwitterScraper extends BasePage {
       }
       
       // Apply rate limiting delay between downloads
-      if (i < imageDataList.length - 1) {
+      if (i < mediaDataList.length - 1) {
         await this.wait(this.config.rateLimitDelay);
       }
     }
     
     this.logger.success(
-      `Completed downloading images for ${this.currentUsername}: ` +
+      `Completed downloading media for ${this.currentUsername}: ` +
       `${successful} successful, ${failed} failed, ${skipped} skipped`
     );
     
+    // Log detailed breakdown
+    this.logger.info(`Downloaded by type: ${byType.images} images, ${byType.videos} videos, ${byType.gifs} GIFs`);
+    
     // Upload to Google Drive if enabled
-    if (this.config.googleDrive?.enableUpload && this.googleDriveUploader && this.downloadedImagePaths.length > 0) {
-      this.logger.info(`Starting batch upload of ${this.downloadedImagePaths.length} images to Google Drive`);
+    if (this.config.googleDrive?.enableUpload && this.googleDriveUploader && this.downloadedMediaPaths.length > 0) {
+      this.logger.info(`Starting batch upload of ${this.downloadedMediaPaths.length} media items to Google Drive`);
       try {
-        const uploadResult = await this.googleDriveUploader.batchUpload(this.downloadedImagePaths, this.currentUsername);
+        const uploadResult = await this.googleDriveUploader.batchUpload(this.downloadedMediaPaths, this.currentUsername);
         this.logger.success(`Google Drive upload completed: ${uploadResult.successful}/${uploadResult.total} successful`);
+        
+        // ADDED: Log storage information if available
+        if (uploadResult.storageInfo) {
+          this.logger.info(
+            `Google Drive Storage: ${uploadResult.storageInfo.formattedUsed} used / ` +
+            `${uploadResult.storageInfo.formattedTotal} total (${uploadResult.storageInfo.usedPercentage.toFixed(1)}% full)`
+          );
+        }
       } catch (error) {
         this.logger.error('Google Drive upload failed', error as Error);
         // Continue execution - upload failure shouldn't halt the scraping process
@@ -392,17 +567,38 @@ export class TwitterScraper extends BasePage {
     }
     
     return { 
-      stats: { successful, failed, skipped, total: imageDataList.length },
-      downloadedPaths: this.downloadedImagePaths
+      stats: { successful, failed, skipped, total: mediaDataList.length, byType },
+      downloadedPaths: this.downloadedMediaPaths
     };
   }
-  
+
+  /**
+   * Backward compatibility method for image downloads
+   * DEPRECATED: Use downloadMedia instead
+   */
+  public async downloadImages(mediaDataList: MediaData[]): Promise<{
+    stats: {
+      successful: number;
+      failed: number;
+      skipped: number;
+      total: number;
+      byType: {
+        images: number;
+        videos: number;
+        gifs: number;
+      };
+    };
+    downloadedPaths: string[];
+  }> {
+    return this.downloadMedia(mediaDataList);
+  }
+
   /**
    * Get download statistics
    * @returns Current download statistics
    */
   public getDownloadStats() {
-    return this.imageDownloader.getStats();
+    return this.mediaDownloader.getStats();
   }
   
   /**

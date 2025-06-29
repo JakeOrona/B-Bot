@@ -1,5 +1,6 @@
 /**
  * Types and interfaces for the Twitter X Image Scraper
+ * UPDATED: Added media type support for videos/GIFs and storage reporting
  */
 
 /**
@@ -34,13 +35,34 @@ export interface ScraperConfig {
 }
 
 /**
- * Image data structure
+ * Media type enumeration
+ * ADDED: Support for different media types
  */
-export interface ImageData {
+export enum MediaType {
+  IMAGE = 'image',
+  VIDEO = 'video',
+  GIF = 'gif'
+}
+
+/**
+ * Media data structure (renamed from ImageData to support all media types)
+ * UPDATED: Added mediaType field and renamed from ImageData
+ */
+export interface MediaData {
   url: string;
   tweetId: string;
   username: string;
   index: number;
+  mediaType: MediaType;
+  originalFilename?: string;
+}
+
+/**
+ * Legacy ImageData interface for backward compatibility
+ * DEPRECATED: Use MediaData instead
+ */
+export interface ImageData extends MediaData {
+  mediaType: MediaType.IMAGE;
 }
 
 /**
@@ -62,12 +84,33 @@ export interface TwitterApiResponse {
 
 /**
  * Download statistics
+ * UPDATED: Added media type breakdown
  */
 export interface DownloadStats {
   total: number;
   successful: number;
   failed: number;
   skipped: number;
+  // ADDED: Breakdown by media type
+  byType: {
+    images: number;
+    videos: number;
+    gifs: number;
+  };
+}
+
+/**
+ * Google Drive storage information
+ * ADDED: Storage capacity reporting
+ */
+export interface StorageInfo {
+  used: number;        // Bytes used
+  total: number;       // Total bytes available
+  available: number;   // Bytes available
+  usedPercentage: number;
+  formattedUsed: string;    // Human readable (e.g., "1.2 GB")
+  formattedTotal: string;   // Human readable (e.g., "15 GB")
+  formattedAvailable: string; // Human readable (e.g., "13.8 GB")
 }
 
 /**
@@ -88,7 +131,8 @@ export enum ScraperErrorType {
   DOWNLOAD_ERROR = 'DOWNLOAD_ERROR',
   RATE_LIMIT_ERROR = 'RATE_LIMIT_ERROR',
   PRIVATE_ACCOUNT_ERROR = 'PRIVATE_ACCOUNT_ERROR',
-  CONFIG_ERROR = 'CONFIG_ERROR'
+  CONFIG_ERROR = 'CONFIG_ERROR',
+  STORAGE_ERROR = 'STORAGE_ERROR'
 }
 
 /**
@@ -106,10 +150,13 @@ export class ScraperError extends Error {
 
 /**
  * Upload result interface for Google Drive uploads
+ * UPDATED: Added storage information
  */
 export interface UploadResult {
   successful: number;
   failed: number;
   skipped: number;
   total: number;
+  // ADDED: Storage information after upload
+  storageInfo?: StorageInfo;
 }

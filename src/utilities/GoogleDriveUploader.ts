@@ -7,7 +7,7 @@ import { google, drive_v3 } from 'googleapis';
 import fs from 'fs';
 import path from 'path';
 import { Logger } from './Logger';
-import { UploadResult } from '../interfaces/ScraperTypes';
+import { UploadResult, StorageInfo } from '../interfaces/ScraperTypes';
 
 export class GoogleDriveUploader {
     private drive: drive_v3.Drive;
@@ -142,77 +142,119 @@ export class GoogleDriveUploader {
      * Batch upload files to Google Drive
      * @param localPaths Array of local file paths to upload
      * @param username Twitter username for folder structure
-     * @returns Upload statistics
+     * @returns Upload statistics with storage information
      */
     public async batchUpload(localPaths: string[], username: string): Promise<UploadResult> {
         if (localPaths.length === 0) {
-            this.logger.info('No files to upload to Google Drive');
-            return { successful: 0, failed: 0, skipped: 0, total: 0 };
-        }
-        
-        // Initialize stats with correct total
-        this.uploadStats = { 
+        this.logger.info('No files to upload to Google Drive');
+        return { 
             successful: 0, 
             failed: 0, 
             skipped: 0, 
-            total: localPaths.length
+            total: 0,
+            storageInfo: await this.getStorageInfo() // ADDED: Include storage info even for empty uploads
         };
+        }
+        
+        this.uploadStats = { successful: 0, failed: 0, skipped: 0, total: localPaths.length };
         
         try {
-            // Create or find the folder structure
-            const destinationFolderId = await this.ensureFolderStructure(username);
-            this.logger.info(`Uploading ${localPaths.length} files to Google Drive folder for ${username}`);
+        // ADDED: Check storage space before starting upload
+        const totalFileSize = this.estimateUploadSize(localPaths);
+        this.logger.info(`Estimated upload size: ${this.formatBytes(totalFileSize)}`);
+        
+        const hasSpace = await this.checkStorageSpace(totalFileSize);
+        if (!hasSpace) {
+            this.logger.warn('Proceeding with upload despite storage warning');
+        }
+        
+        // Create or find the folder structure
+        const destinationFolderId = await this.ensureFolderStructure(username);
+        this.logger.info(`Uploading ${localPaths.length} files to Google Drive folder for ${username}`);
+        
+        // Process each file
+        for (const localPath of localPaths) {
+            const fileName = path.basename(localPath);
+            try {
+            // Check if the file already exists
+            const isDuplicate = await this.checkDuplicateExists(fileName, destinationFolderId);
             
-            // Process each file
-            for (const localPath of localPaths) {
-                const fileName = path.basename(localPath);
-                try {
-                    // Check if the file already exists
-                    const isDuplicate = await this.checkDuplicateExists(fileName, destinationFolderId);
-                    
-                    if (isDuplicate) {
-                        this.uploadStats.skipped++;
-                        this.logger.info(`Skipped duplicate file: ${fileName}`);
-                    } else {
-                        // Upload the file
-                        const success = await this.uploadSingleFile(localPath, fileName, destinationFolderId);
-                        
-                        if (success) {
-                            this.uploadStats.successful++;
-                            // Log progress periodically
-                            if (this.uploadStats.successful % 10 === 0 || 
-                                this.uploadStats.successful + this.uploadStats.skipped + this.uploadStats.failed === this.uploadStats.total) {
-                                this.logger.info(`Uploaded ${this.uploadStats.successful}/${this.uploadStats.total} files to Google Drive`);
-                            }
-                        } else {
-                            this.uploadStats.failed++;
-                            this.logger.error(`Failed to upload: ${fileName}`);
-                        }
-                    }
-                } catch (fileError) {
-                    this.uploadStats.failed++;
-                    this.logger.error(`Error processing ${fileName}`, fileError as Error);
+            if (isDuplicate) {
+                this.uploadStats.skipped++;
+                this.logger.info(`Skipped duplicate file: ${fileName}`);
+            } else {
+                // Upload the file
+                const success = await this.uploadSingleFile(localPath, fileName, destinationFolderId);
+                
+                if (success) {
+                this.uploadStats.successful++;
+                // Log progress periodically
+                if (this.uploadStats.successful % 10 === 0 || 
+                    this.uploadStats.successful + this.uploadStats.skipped + this.uploadStats.failed === this.uploadStats.total) {
+                    this.logger.info(`Uploaded ${this.uploadStats.successful}/${this.uploadStats.total} files to Google Drive`);
+                }
+                } else {
+                this.uploadStats.failed++;
+                this.logger.error(`Failed to upload: ${fileName}`);
                 }
             }
-            
-            this.logger.success(
-                `Google Drive upload completed: ${this.uploadStats.successful} successful, ` +
-                `${this.uploadStats.skipped} skipped, ${this.uploadStats.failed} failed`
-            );
-            
-            // Verify totals make sense before returning
-            const calculatedTotal = this.uploadStats.successful + this.uploadStats.failed + this.uploadStats.skipped;
-            if (calculatedTotal !== this.uploadStats.total) {
-                this.logger.warn(`Upload statistics mismatch: calculated ${calculatedTotal}, expected ${this.uploadStats.total}`);
-                // Fix the total to match reality
-                this.uploadStats.total = calculatedTotal;
+            } catch (fileError) {
+            this.uploadStats.failed++;
+            this.logger.error(`Error processing ${fileName}`, fileError as Error);
             }
-            
-            return { ...this.uploadStats };
+        }
+        
+        this.logger.success(
+            `Google Drive upload completed: ${this.uploadStats.successful} successful, ` +
+            `${this.uploadStats.skipped} skipped, ${this.uploadStats.failed} failed`
+        );
+        
+        // ADDED: Get storage information after upload
+        let storageInfo: StorageInfo;
+        try {
+            storageInfo = await this.getStorageInfo();
         } catch (error) {
-            this.logger.error('Batch upload failed', error as Error);
-            // Return current stats even if main process fails
-            return { ...this.uploadStats };
+            this.logger.error('Could not retrieve post-upload storage information', error as Error);
+            // Create a placeholder storage info if retrieval fails
+            storageInfo = {
+            used: 0,
+            total: 0,
+            available: 0,
+            usedPercentage: 0,
+            formattedUsed: 'Unknown',
+            formattedTotal: 'Unknown',
+            formattedAvailable: 'Unknown'
+            };
+        }
+        
+        return {
+            ...this.uploadStats,
+            storageInfo
+        };
+        } catch (error) {
+        this.logger.error('Batch upload failed', error as Error);
+        
+        // ADDED: Include storage info even on failure
+        let storageInfo: StorageInfo;
+        try {
+            storageInfo = await this.getStorageInfo();
+        } catch (storageError) {
+            storageInfo = {
+            used: 0,
+            total: 0,
+            available: 0,
+            usedPercentage: 0,
+            formattedUsed: 'Unknown',
+            formattedTotal: 'Unknown',
+            formattedAvailable: 'Unknown'
+            };
+        }
+        
+        // If the main process fails, return current stats with storage info
+        return {
+            ...this.uploadStats,
+            storageInfo
+        };
         }
     }
     
@@ -363,5 +405,118 @@ export class GoogleDriveUploader {
                 return false;
             }
         }
+    }
+    /**
+   * Get current Google Drive storage information
+   * ADDED: Method to retrieve storage capacity and usage
+   * @returns Promise resolving to storage information
+   */
+    public async getStorageInfo(): Promise<StorageInfo> {
+        try {
+        this.logger.info('Retrieving Google Drive storage information...');
+        
+        const response = await this.drive.about.get({
+            fields: 'storageQuota'
+        });
+        
+        const quota = response.data.storageQuota;
+        
+        if (!quota) {
+            throw new Error('Unable to retrieve storage quota information');
+        }
+        
+        // Parse storage values (they come as strings)
+        const used = parseInt(quota.usage || '0', 10);
+        const total = parseInt(quota.limit || '0', 10);
+        const available = total - used;
+        const usedPercentage = total > 0 ? (used / total) * 100 : 0;
+        
+        // Format storage values to human-readable strings
+        const storageInfo: StorageInfo = {
+            used,
+            total,
+            available,
+            usedPercentage,
+            formattedUsed: this.formatBytes(used),
+            formattedTotal: this.formatBytes(total),
+            formattedAvailable: this.formatBytes(available)
+        };
+        
+        this.logger.info(
+            `Storage: ${storageInfo.formattedUsed} / ${storageInfo.formattedTotal} ` +
+            `(${storageInfo.usedPercentage.toFixed(1)}% used, ${storageInfo.formattedAvailable} available)`
+        );
+        
+        return storageInfo;
+        } catch (error) {
+        this.logger.error('Failed to retrieve storage information', error as Error);
+        throw new Error(`Storage info retrieval failed: ${(error as Error).message}`);
+        }
+    }
+
+    /**
+     * Format bytes to human-readable string
+     * ADDED: Utility method for storage formatting
+     * @param bytes Number of bytes
+     * @returns Formatted string (e.g., "1.5 GB")
+     */
+    private formatBytes(bytes: number): string {
+        if (bytes === 0) return '0 Bytes';
+        
+        const k = 1024;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        
+        const size = parseFloat((bytes / Math.pow(k, i)).toFixed(2));
+        return `${size} ${sizes[i]}`;
+    }
+
+    /**
+     * Check if sufficient storage space is available
+     * ADDED: Storage space validation before uploads
+     * @param estimatedSizeBytes Estimated size of files to upload
+     * @returns Boolean indicating if there's sufficient space
+     */
+    public async checkStorageSpace(estimatedSizeBytes: number): Promise<boolean> {
+        try {
+        const storageInfo = await this.getStorageInfo();
+        const hasSpace = storageInfo.available >= estimatedSizeBytes;
+        
+        if (!hasSpace) {
+            this.logger.warn(
+            `Insufficient storage space. Need: ${this.formatBytes(estimatedSizeBytes)}, ` +
+            `Available: ${storageInfo.formattedAvailable}`
+            );
+        }
+        
+        return hasSpace;
+        } catch (error) {
+        this.logger.error('Could not verify storage space, proceeding with upload', error as Error);
+        return true; // Proceed if we can't check
+        }
+    }
+
+    /**
+   * Estimate total upload size for files
+   * @param localPaths Array of file paths
+   * @returns Estimated total size in bytes
+   */
+    private estimateUploadSize(localPaths: string[]): number {
+        let totalSize = 0;
+        
+        for (const filePath of localPaths) {
+        try {
+            if (fs.existsSync(filePath)) {
+            const stats = fs.statSync(filePath);
+            totalSize += stats.size;
+            }
+        } catch (error) {
+            this.logger.error(`Could not get size for file: ${filePath}`, error as Error);
+            // Estimate 2MB per file if we can't get actual size
+            totalSize += 2 * 1024 * 1024;
+        }
+        }
+        
+        return totalSize;
     }
 }
