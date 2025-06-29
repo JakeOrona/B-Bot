@@ -50,3 +50,7 @@ config/twitter_cookies.json
 
 # Playwright
 /blob-report/
+
+# VsCode Copilot
+/.github/copilot-instructions.md
+

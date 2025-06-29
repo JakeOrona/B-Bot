@@ -108,12 +108,31 @@ class TwitterImageScraper {
           const artists = this.configManager.loadArtists();
           this.logger.info(`Found ${artists.length} artists to scrape using worker pool in ${processingMode.toUpperCase()} mode`);
           
-          // Initialize worker pool
+          // Check Google Drive configuration and create uploader if enabled
+          const googleDriveConfig = this.configManager.getGoogleDriveConfig();
+          let googleDriveUploader = null;
+          
+          if (googleDriveConfig.enableUpload && googleDriveConfig.rootFolderId) {
+              try {
+                  googleDriveUploader = new GoogleDriveUploader(
+                      googleDriveConfig.credentialsPath,
+                      googleDriveConfig.rootFolderId
+                  );
+                  this.logger.info('Google Drive uploader initialized for worker pool');
+              } catch (error) {
+                  this.logger.error('Failed to initialize Google Drive uploader for worker pool', error as Error);
+                  // Continue without Google Drive upload capability
+              }
+          } else {
+              this.logger.info('Google Drive upload disabled or not configured');
+          }
+          
+          // Initialize worker pool with Google Drive uploader
           const workerPool = new WorkerPool(
               this.browser,
               authCredentials,
               scraperConfig,
-              this.googleDriveUploader,
+              googleDriveUploader, // Pass the uploader to workers
               3 // 3 workers as requested
           );
           
@@ -142,7 +161,8 @@ class TwitterImageScraper {
                   `${aggregatedStats.skippedArtists} skipped, ${aggregatedStats.failedArtists} failed\n` +
                   `  Downloads: ${aggregatedStats.downloadStats.successful}/${aggregatedStats.downloadStats.total} successful` +
                   (aggregatedStats.uploadStats ? 
-                      `\n  Uploads: ${aggregatedStats.uploadStats.successful}/${aggregatedStats.uploadStats.total} successful` : '')
+                      `\n  Uploads: ${aggregatedStats.uploadStats.successful}/${aggregatedStats.uploadStats.total} successful` : 
+                      `\n  Uploads: Not enabled or configured`)
               );
               
           } finally {
@@ -232,77 +252,92 @@ class TwitterImageScraper {
   }
   
   /**
-   * Run upload-only mode (without scraping Twitter)
-   * This mode will scan the download directory for existing images and upload them to Google Drive
+   * Run upload-only mode with concurrent processing (upload existing images without scraping)
    */
-  public async runUploadOnly(): Promise<void> {
-    try {
-      const scraperConfig = this.configManager.getScraperConfig();
-      
-      // Ensure Google Drive uploader is initialized
-      if (!this.googleDriveUploader) {
-        const googleDriveConfig = this.configManager.getGoogleDriveConfig();
-        if (!googleDriveConfig.enableUpload) {
-          throw new Error('Google Drive upload is not enabled in configuration');
-        }
-        
-        try {
-          this.googleDriveUploader = new GoogleDriveUploader(
-            googleDriveConfig.credentialsPath,
-            googleDriveConfig.rootFolderId
-          );
-          this.logger.info('Google Drive uploader initialized');
-        } catch (error) {
-          throw new Error(`Failed to initialize Google Drive uploader: ${(error as Error).message}`);
-        }
-      }
-      
-      this.logger.info('Starting upload-only mode');
-      
-      // Scan existing images in the download directory
-      const existingImages = await this.scanExistingImages(scraperConfig.downloadPath);
-      
-      if (Object.keys(existingImages).length === 0) {
-        this.logger.info('No images found in the download directory to upload.');
-        return;
-      }
-      
-      this.logger.info(`Found ${Object.keys(existingImages).length} artists with images to upload`);
-      
-      // Process each artist's folder
-      for (const artist of Object.keys(existingImages)) {
-        const imagePaths = existingImages[artist];
-        
-        if (imagePaths.length === 0) {
-          this.logger.warn(`No images found for ${artist}, skipping...`);
-          continue;
-        }
-        
-        try {
-          this.logger.info(`Starting batch upload of ${imagePaths.length} images for @${artist}`);
-          const uploadResult = await this.googleDriveUploader.batchUpload(imagePaths, artist);
-          this.logger.success(`Upload completed for @${artist}: ${uploadResult.successful}/${uploadResult.total} successful, ${uploadResult.failed} failed, ${uploadResult.skipped} skipped`);
-        } catch (error) {
-          this.logger.error(`Upload failed for @${artist}`, error as Error);
-          // Continue with next artist
-        }
-      }
-      
-      this.logger.success('Upload-only mode completed successfully');
-      
-      // Clean up old files based on retention policy (keep files for 3 days by default)
+  public async runUploadOnly(processingMode: ProcessingMode = ProcessingMode.DISTRIBUTED): Promise<void> {
       try {
-        this.logger.info('Starting cleanup of files older than 3 days...');
-        await FileCleanup.cleanupOldFiles(scraperConfig.downloadPath, 3);
-        this.logger.info('File cleanup completed');
+          const scraperConfig = this.configManager.getScraperConfig();
+          
+          // Ensure Google Drive uploader is initialized
+          const googleDriveConfig = this.configManager.getGoogleDriveConfig();
+          if (!googleDriveConfig.enableUpload) {
+              throw new Error('Google Drive upload is not enabled in configuration');
+          }
+          
+          let googleDriveUploader: GoogleDriveUploader;
+          try {
+              googleDriveUploader = new GoogleDriveUploader(
+                  googleDriveConfig.credentialsPath,
+                  googleDriveConfig.rootFolderId
+              );
+              this.logger.info('Google Drive uploader initialized for upload-only mode');
+          } catch (error) {
+              throw new Error(`Failed to initialize Google Drive uploader: ${(error as Error).message}`);
+          }
+          
+          this.logger.info(`Starting upload-only mode with ${processingMode.toUpperCase()} processing`);
+          
+          // Scan existing images in the download directory
+          const existingImages = await this.scanExistingImages(scraperConfig.downloadPath);
+          
+          if (Object.keys(existingImages).length === 0) {
+              this.logger.info('No images found in the download directory to upload.');
+              return;
+          }
+          
+          this.logger.info(`Found ${Object.keys(existingImages).length} artists with images to upload using concurrent processing`);
+          
+          // Create upload tasks for concurrent processing
+          const uploadTasks: { artist: string; imagePaths: string[] }[] = [];
+          for (const artist of Object.keys(existingImages)) {
+              const imagePaths = existingImages[artist];
+              if (imagePaths.length > 0) {
+                  uploadTasks.push({ artist, imagePaths });
+              }
+          }
+          
+          this.logger.info(`Processing ${uploadTasks.length} upload tasks with ${processingMode} mode`);
+          
+          // Process upload tasks concurrently based on the selected mode
+          const startTime = Date.now();
+          let results: any[] = [];
+          
+          if (processingMode === ProcessingMode.DISTRIBUTED) {
+              results = await this.processUploadTasksDistributed(uploadTasks, googleDriveUploader);
+          } else if (processingMode === ProcessingMode.MAX_CONCURRENT) {
+              results = await this.processUploadTasksMaxConcurrent(uploadTasks, googleDriveUploader);
+          } else if (processingMode === ProcessingMode.BATCHED) {
+              results = await this.processUploadTasksBatched(uploadTasks, googleDriveUploader);
+          }
+          
+          const endTime = Date.now();
+          const totalTime = Math.round((endTime - startTime) / 1000);
+          
+          // Calculate totals
+          const totalUploads = results.reduce((sum, result) => sum + result.total, 0);
+          const successfulUploads = results.reduce((sum, result) => sum + result.successful, 0);
+          const failedUploads = results.reduce((sum, result) => sum + result.failed, 0);
+          const skippedUploads = results.reduce((sum, result) => sum + result.skipped, 0);
+          
+          this.logger.success(
+              `${processingMode.toUpperCase()} upload-only mode completed in ${totalTime} seconds:\n` +
+              `  Artists: ${results.length} processed\n` +
+              `  Uploads: ${successfulUploads}/${totalUploads} successful, ${failedUploads} failed, ${skippedUploads} skipped`
+          );
+          
+          // Clean up old files based on retention policy
+          try {
+              this.logger.info('Starting cleanup of files older than 3 days...');
+              await FileCleanup.cleanupOldFiles(scraperConfig.downloadPath, 3);
+              this.logger.info('File cleanup completed');
+          } catch (error) {
+              this.logger.error('File cleanup failed', error as Error);
+          }
+          
       } catch (error) {
-        this.logger.error('File cleanup failed', error as Error);
-        // Continue execution - cleanup failure shouldn't halt the process
+          this.logger.error('Upload-only execution failed', error as Error);
+          throw error;
       }
-    } catch (error) {
-      this.logger.error('Upload-only execution failed', error as Error);
-      throw error;
-    }
   }
   
   /**
@@ -356,6 +391,193 @@ class TwitterImageScraper {
       this.logger.error('Error scanning existing images', error as Error);
       return result;
     }
+  }
+
+  /**
+   * Process upload tasks using distributed mode
+   */
+  private async processUploadTasksDistributed(
+      uploadTasks: { artist: string; imagePaths: string[] }[], 
+      googleDriveUploader: GoogleDriveUploader
+  ): Promise<any[]> {
+      const maxWorkers = 3;
+      const taskQueues: { artist: string; imagePaths: string[] }[][] = [];
+      
+      // Initialize worker queues
+      for (let i = 0; i < maxWorkers; i++) {
+          taskQueues.push([]);
+      }
+      
+      // Distribute tasks across queues
+      uploadTasks.forEach((task, index) => {
+          const queueIndex = index % maxWorkers;
+          taskQueues[queueIndex].push(task);
+      });
+      
+      // Log distribution
+      taskQueues.forEach((queue, index) => {
+          const artists = queue.map(task => task.artist);
+          this.logger.info(`Upload Worker ${index + 1} assigned ${queue.length} artists: ${artists.join(', ')}`);
+      });
+      
+      // Process queues concurrently
+      const queuePromises = taskQueues.map((queue, workerIndex) => 
+          this.processUploadQueue(queue, googleDriveUploader, workerIndex + 1)
+      );
+      
+      const queueResults = await Promise.all(queuePromises);
+      
+      // Flatten results
+      const allResults: any[] = [];
+      queueResults.forEach(results => allResults.push(...results));
+      
+      return allResults;
+  }
+
+  /**
+   * Process upload tasks using maximum concurrency mode
+   */
+  private async processUploadTasksMaxConcurrent(
+      uploadTasks: { artist: string; imagePaths: string[] }[], 
+      googleDriveUploader: GoogleDriveUploader
+  ): Promise<any[]> {
+      const maxWorkers = 3;
+      const taskIndex = { current: 0 };
+      const results: any[] = [];
+      
+      // Create worker promises
+      const workerPromises = Array.from({ length: maxWorkers }, async (_, workerIndex) => {
+          const workerId = workerIndex + 1;
+          const workerResults: any[] = [];
+          
+          while (taskIndex.current < uploadTasks.length) {
+              // Atomically get next task
+              const currentIndex = taskIndex.current++;
+              if (currentIndex >= uploadTasks.length) break;
+              
+              const task = uploadTasks[currentIndex];
+              
+              try {
+                  this.logger.info(`Upload Worker ${workerId}: Processing @${task.artist} (${currentIndex + 1}/${uploadTasks.length})`);
+                  const result = await googleDriveUploader.batchUpload(task.imagePaths, task.artist);
+                  workerResults.push(result);
+                  
+                  // Small delay
+                  await new Promise(resolve => setTimeout(resolve, 500));
+                  
+              } catch (error) {
+                  this.logger.error(`Upload Worker ${workerId}: Failed @${task.artist}`, error as Error);
+                  workerResults.push({
+                      successful: 0,
+                      failed: task.imagePaths.length,
+                      skipped: 0,
+                      total: task.imagePaths.length
+                  });
+              }
+          }
+          
+          return workerResults;
+      });
+      
+      const allWorkerResults = await Promise.all(workerPromises);
+      allWorkerResults.forEach(workerResults => results.push(...workerResults));
+      
+      return results;
+  }
+
+  /**
+   * Process upload tasks using batched mode
+   */
+  private async processUploadTasksBatched(
+      uploadTasks: { artist: string; imagePaths: string[] }[], 
+      googleDriveUploader: GoogleDriveUploader
+  ): Promise<any[]> {
+      const maxWorkers = 3;
+      const results: any[] = [];
+      
+      // Process in batches
+      for (let i = 0; i < uploadTasks.length; i += maxWorkers) {
+          const batch = uploadTasks.slice(i, i + maxWorkers);
+          const batchNumber = Math.floor(i / maxWorkers) + 1;
+          const totalBatches = Math.ceil(uploadTasks.length / maxWorkers);
+          
+          const artists = batch.map(task => task.artist);
+          this.logger.info(`Processing upload batch ${batchNumber}/${totalBatches} with ${batch.length} artists: ${artists.join(', ')}`);
+          
+          // Process batch concurrently
+          const batchPromises = batch.map((task, index) => {
+              const workerId = index + 1;
+              
+              return googleDriveUploader.batchUpload(task.imagePaths, task.artist).then(result => {
+                  this.logger.info(`Upload Worker ${workerId}: Completed @${task.artist}`);
+                  return result;
+              }).catch(error => {
+                  this.logger.error(`Upload Worker ${workerId}: Failed @${task.artist}`, error as Error);
+                  return {
+                      successful: 0,
+                      failed: task.imagePaths.length,
+                      skipped: 0,
+                      total: task.imagePaths.length
+                  };
+              });
+          });
+          
+          const batchResults = await Promise.all(batchPromises);
+          results.push(...batchResults);
+          
+          // Add delay between batches
+          if (i + maxWorkers < uploadTasks.length) {
+              this.logger.info(`Upload batch ${batchNumber} completed. Waiting 4000ms before next batch...`);
+              await new Promise(resolve => setTimeout(resolve, 4000));
+          }
+      }
+      
+      return results;
+  }
+
+  /**
+   * Process an upload queue for a single worker
+   */
+  private async processUploadQueue(
+      queue: { artist: string; imagePaths: string[] }[], 
+      googleDriveUploader: GoogleDriveUploader, 
+      workerId: number
+  ): Promise<any[]> {
+      const results: any[] = [];
+      
+      if (queue.length === 0) {
+          this.logger.info(`Upload Worker ${workerId}: No artists assigned`);
+          return results;
+      }
+      
+      this.logger.info(`Upload Worker ${workerId}: Starting to process ${queue.length} artists`);
+      
+      for (let i = 0; i < queue.length; i++) {
+          const task = queue[i];
+          
+          try {
+              this.logger.info(`Upload Worker ${workerId}: Processing @${task.artist} (${i + 1}/${queue.length})`);
+              const result = await googleDriveUploader.batchUpload(task.imagePaths, task.artist);
+              results.push(result);
+              
+              // Add delay between artists
+              if (i < queue.length - 1) {
+                  await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+              
+          } catch (error) {
+              this.logger.error(`Upload Worker ${workerId}: Failed to process @${task.artist}`, error as Error);
+              results.push({
+                  successful: 0,
+                  failed: task.imagePaths.length,
+                  skipped: 0,
+                  total: task.imagePaths.length
+              });
+          }
+      }
+      
+      this.logger.success(`Upload Worker ${workerId}: Completed processing ${queue.length} artists`);
+      return results;
   }
   
   /**
@@ -572,8 +794,8 @@ async function main(): Promise<void> {
             console.log(`Running in scrape-only mode with ${processingMode} processing...`);
             await scraper.runScrapeOnly(processingMode);
         } else if (isUploadOnly) {
-            console.log('Running in upload-only mode...');
-            await scraper.runUploadOnly();
+            console.log(`Running in upload-only mode with ${processingMode} processing...`);
+            await scraper.runUploadOnly(processingMode); // Pass processing mode
         } else {
             console.log(`Running in full mode (scrape + upload) with ${processingMode} processing...`);
             await scraper.run(processingMode);
