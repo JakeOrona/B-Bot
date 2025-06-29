@@ -130,7 +130,7 @@ export class TwitterScraper extends BasePage {
           
           this.logger.info(`${logPrefix ? logPrefix + ': ' : ''}Starting to scroll and load media for ${artistName}`);
           
-          while (scrollCount < maxScrolls && sameHeightCount < 3) {
+          while (scrollCount < maxScrolls && sameHeightCount < 10) {
               // Get current scroll height
               const currentHeight = await this.page.evaluate(() => document.body.scrollHeight);
               
