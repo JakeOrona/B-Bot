@@ -77,6 +77,35 @@ export class TwitterAuth extends BasePage {
   private readonly loginForm = this.page.locator('form[data-testid="LoginForm_Login_Button"]').first();
   private readonly signupButton = this.page.getByTestId('signup');
   private readonly userProfileName = this.page.locator('[data-testid="User-Name"]');
+
+  private readonly usernameInputs = [
+    this.page.getByRole('textbox', { name: 'Phone, email, or username' }),
+    this.page.locator('input[name="text"]').first(),
+    this.page.locator('input[data-testid="ocfEnterTextTextInput"]'),
+    this.page.locator('input[autocomplete="username"]'),
+    this.page.locator('input[type="text"]').first()
+  ];
+
+  private readonly nextButtons = [
+    this.page.getByRole('button', { name: 'Next' }),
+    this.page.locator('button[role="button"]:has-text("Next")'),
+    this.page.locator('[data-testid="LoginForm_Login_Button"]'),
+    this.page.locator('button:has-text("Next")')
+  ];
+
+  private readonly passwordInputs = [
+    this.page.getByRole('textbox', { name: 'password' }),
+    this.page.locator('input[name="password"]'),
+    this.page.locator('input[type="password"]'),
+    this.page.locator('input[autocomplete="current-password"]')
+  ];
+
+  private readonly loginButtons = [
+    this.page.getByTestId('LoginForm_Login_Button'),
+    this.page.locator('button[data-testid="LoginForm_Login_Button"]'),
+    this.page.locator('button:has-text("Log in")'),
+    this.page.locator('button[type="submit"]')
+  ];
   
   /**
    * Login to Twitter with username and password
@@ -107,47 +136,117 @@ export class TwitterAuth extends BasePage {
    * @param credentials Twitter login credentials
    */
   private async performFullLogin(credentials: AuthCredentials): Promise<void> {
+    this.logger.info('Starting full login process...');
+    
     // Navigate to login page
     await this.navigateWithRetry(this.loginUrl);
     
-    // Wait for the login form
-    await this.usernameInput.waitFor({ state: 'visible' });
+    // Wait for page to load and try multiple selectors for username input
+    this.logger.info('Looking for username input field...');
+    const usernameInput = await this.findFirstAvailableElement(this.usernameInputs, 15000);
+    
+    if (!usernameInput) {
+        // Take screenshot for debugging
+        const screenshotPath = await this.takeScreenshot('login_page_no_username_field');
+        throw new ScraperError(
+            `Could not find username input field. Screenshot saved to ${screenshotPath}`,
+            ScraperErrorType.AUTHENTICATION_ERROR
+        );
+    }
 
     // Fill in username
-    await this.usernameInput.fill(credentials.username);
-    await this.nextButton.click();
-
+    this.logger.info('Filling username...');
+    await usernameInput.fill(credentials.username);
+    
+    // Find and click Next button
+    const nextButton = await this.findFirstAvailableElement(this.nextButtons, 5000);
+    if (!nextButton) {
+        throw new ScraperError('Could not find Next button', ScraperErrorType.AUTHENTICATION_ERROR);
+    }
+    
+    await nextButton.click();
+    
+    // Wait for potential verification challenge
+    await this.page.waitForTimeout(2000);
+    
     // Check for verification challenge (unusual login activity)
     const hasVerificationChallenge = await this.elementExists('input[data-testid="ocfEnterTextTextInput"]');
     if (hasVerificationChallenge) {
-      await this.handleVerificationChallenge(credentials);
+        await this.handleVerificationChallenge(credentials);
     }
     
-    // Wait for password field
-    await this.waitForSelector('input[name="password"]');
+    // Wait for password field and try multiple selectors
+    this.logger.info('Looking for password input field...');
+    const passwordInput = await this.findFirstAvailableElement(this.passwordInputs, 15000);
+    
+    if (!passwordInput) {
+        // Take screenshot for debugging
+        const screenshotPath = await this.takeScreenshot('login_page_no_password_field');
+        throw new ScraperError(
+            `Could not find password input field. Screenshot saved to ${screenshotPath}`,
+            ScraperErrorType.AUTHENTICATION_ERROR
+        );
+    }
     
     // Fill in password
-    await this.passwordInput.fill(credentials.password);
-    await this.loginButton.click();
+    this.logger.info('Filling password...');
+    await passwordInput.fill(credentials.password);
+    
+    // Find and click login button
+    const loginButton = await this.findFirstAvailableElement(this.loginButtons, 5000);
+    if (!loginButton) {
+        throw new ScraperError('Could not find login button', ScraperErrorType.AUTHENTICATION_ERROR);
+    }
+    
+    await loginButton.click();
 
     // Wait for navigation to complete
-    await this.page.waitForTimeout(1000); // Wait a bit for the login process to complete
+    this.logger.info('Waiting for login to complete...');
+    await this.page.waitForTimeout(3000);
     
     // Handle 2FA if needed
     await this.handle2FA();
     
     // Verify successful login with improved multi-check verification
     if (!(await this.verifyLoggedIn())) {
-      // Take screenshot for debugging in case of failure
-      const screenshotPath = await this.takeScreenshot('login_failure');
-      
-      throw new ScraperError(
-        `Login failed - unable to verify successful login. Screenshot saved to ${screenshotPath}`,
-        ScraperErrorType.AUTHENTICATION_ERROR
-      );
+        // Take screenshot for debugging in case of failure
+        const screenshotPath = await this.takeScreenshot('login_verification_failed');
+        
+        throw new ScraperError(
+            `Login verification failed. Screenshot saved to ${screenshotPath}`,
+            ScraperErrorType.AUTHENTICATION_ERROR
+        );
     }
     
     this.logger.success('Successfully logged in to Twitter');
+  }
+
+  /**
+ * Find the first available element from a list of locators
+ * @param locators Array of locators to try
+ * @param timeout Maximum time to wait for any element
+ * @returns First found element or null
+ */
+private async findFirstAvailableElement(locators: any[], timeout: number = 10000): Promise<any> {
+    const startTime = Date.now();
+    
+    while (Date.now() - startTime < timeout) {
+        for (const locator of locators) {
+            try {
+                await locator.waitFor({ state: 'visible', timeout: 1000 });
+                this.logger.info(`Found element using locator: ${locator.toString()}`);
+                return locator;
+            } catch (error) {
+                // Continue to next locator
+            }
+        }
+        
+        // Wait a bit before trying again
+        await this.page.waitForTimeout(500);
+    }
+    
+    this.logger.error('Could not find any element from the provided locators');
+    return null;
   }
   
   /**
@@ -198,75 +297,65 @@ export class TwitterAuth extends BasePage {
    */
   private async verifyLoggedIn(): Promise<boolean> {
     try {
-      this.logger.info('Verifying login status with multi-step checks...');
-      
-      // Step 1: Check multiple positive indicators (elements that should be present)
-      this.logger.info('Step 1: Checking positive indicators of logged-in state');
-      let positiveChecks = 0;
-      
-      // Create a list of verification promises with timeouts to avoid long waits
-      const verificationTimeoutMs = 3000;
-      
-      // Primary UI elements visible when logged in
-      const homeTabVisible = await this.isElementVisible(this.homeTabLink, verificationTimeoutMs);
-      if (homeTabVisible) positiveChecks++;
-      
-      const accountMenuVisible = await this.isElementVisible(this.accountMenuButton, verificationTimeoutMs);
-      if (accountMenuVisible) positiveChecks++;
-      
-      const composeButtonVisible = await this.isElementVisible(this.composeButton, verificationTimeoutMs);
-      if (composeButtonVisible) positiveChecks++;
-      
-      const notificationsTabVisible = await this.isElementVisible(this.notificationsTabLink, verificationTimeoutMs);
-      if (notificationsTabVisible) positiveChecks++;
-      
-      this.logger.info(`Positive indicators found: ${positiveChecks}/4`);
-      
-      // If we have enough positive indicators, we can be confident user is logged in
-      if (positiveChecks >= 2) {
-        this.logger.info('Login verified through primary indicators');
-        return true;
-      }
-      
-      // Step 2: Verify negative indicators (login elements should be absent)
-      this.logger.info('Step 2: Verifying absence of login elements');
-      
-      const loginFormVisible = await this.isElementVisible(this.loginForm, verificationTimeoutMs);
-      const signupButtonVisible = await this.isElementVisible(this.signupButton, verificationTimeoutMs);
-      
-      if (!loginFormVisible && !signupButtonVisible && positiveChecks > 0) {
-        this.logger.info('Login verified through absence of login UI and presence of at least one authenticated element');
-        return true;
-      }
-      
-      // Step 3: URL Verification
-      this.logger.info('Step 3: Verifying URL patterns');
-      const currentUrl = this.page.url();
-      
-      const isLoginPage = currentUrl.includes('/login') || currentUrl.includes('/signin');
-      const isAuthenticatedRoute = currentUrl.includes('/home') || 
-                                  currentUrl.includes('/notifications') || 
-                                  currentUrl.includes('/messages');
-      
-      if (isAuthenticatedRoute && !isLoginPage && positiveChecks > 0) {
-        this.logger.info('Login verified through URL pattern matching authenticated routes');
-        return true;
-      }
-      
-      // Step 4: Final verification attempt - check for personalized content
-      if (positiveChecks > 0 || isAuthenticatedRoute) {
-        const userProfileVisible = await this.isElementVisible(this.userProfileName, verificationTimeoutMs);
-        if (userProfileVisible) {
-          this.logger.info('Login verified through presence of user profile elements');
-          return true;
+        this.logger.info('Verifying login status with multi-step checks...');
+        
+        // Wait a moment for page to stabilize
+        await this.page.waitForTimeout(2000);
+        
+        // Check current URL for authenticated patterns
+        const currentUrl = this.page.url();
+        this.logger.info(`Current URL: ${currentUrl}`);
+        
+        // If we're still on login page, definitely not logged in
+        if (currentUrl.includes('/login') || currentUrl.includes('/signin')) {
+            this.logger.warn('Still on login page, not authenticated');
+            return false;
         }
-      }
-      
-      this.logger.warn('Login verification failed - insufficient indicators of authenticated state');
-      return false;
+        
+        // Check for authenticated routes
+        const isAuthenticatedRoute = currentUrl.includes('/home') || 
+                                    currentUrl.includes('/notifications') || 
+                                    currentUrl.includes('/messages') ||
+                                    currentUrl.includes('x.com') && !currentUrl.includes('/login');
+        
+        if (isAuthenticatedRoute) {
+            this.logger.info('On authenticated route, checking for UI elements...');
+            
+            // Look for any navigation elements that indicate we're logged in
+            const authElements = [
+                this.homeTabLink,
+                this.accountMenuButton,
+                this.composeButton,
+                this.notificationsTabLink
+            ];
+            
+            for (const element of authElements) {
+                try {
+                    await element.waitFor({ state: 'visible', timeout: 3000 });
+                    this.logger.success('Found authenticated UI element, login verified');
+                    return true;
+                } catch (error) {
+                    // Continue checking other elements
+                }
+            }
+        }
+        
+        // Try navigating to home to test authentication
+        this.logger.info('Testing authentication by navigating to home...');
+        await this.page.goto('https://x.com/home', { timeout: 10000 });
+        await this.page.waitForTimeout(2000);
+        
+        const finalUrl = this.page.url();
+        if (!finalUrl.includes('/login') && (finalUrl.includes('/home') || finalUrl.includes('x.com'))) {
+            this.logger.success('Successfully navigated to home, authentication verified');
+            return true;
+        }
+        
+        this.logger.warn('Login verification failed - unable to confirm authenticated state');
+        return false;
     } catch (error) {
-      this.logger.error('Error during login verification', error as Error);
-      return false;
+        this.logger.error('Error during login verification', error as Error);
+        return false;
     }
   }
   

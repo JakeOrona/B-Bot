@@ -10,6 +10,7 @@ import { Logger } from './utilities/Logger';
 import { GoogleDriveUploader } from './utilities/GoogleDriveUploader';
 import { FileCleanup } from './utilities/FileCleanup';
 import { ScraperError, ScraperErrorType } from './interfaces/ScraperTypes';
+import { WorkerPool, WorkerResult, ProcessingMode } from './utilities/ArtistWorker';
 import path from 'path';
 import fs from 'fs';
 import yargs from 'yargs';
@@ -92,208 +93,142 @@ class TwitterImageScraper {
   }
   
   /**
-   * Run the full scraper process (scrape + upload)
+   * Run the full scraper process using worker pool (scrape + upload)
    */
-  public async run(): Promise<void> {
-    if (!this.browser || !this.context || !this.page) {
-      throw new Error('Scraper not initialized. Call initialize() first.');
-    }
-    
-    try {
-      const authCredentials = this.configManager.getAuthCredentials();
-      const scraperConfig = this.configManager.getScraperConfig();
-      
-      // Initialize authentication
-      const twitterAuth = new TwitterAuth(this.page, this.context, this.browser);
-      
-      // Login to Twitter
-      this.logger.info('Logging in to Twitter...');
-      await twitterAuth.login(authCredentials);
-      
-      // Initialize scraper
-      const twitterScraper = new TwitterScraper(
-        this.page,
-        this.context,
-        this.browser,
-        scraperConfig
-      );
-      
-      // Get list of artists to scrape
-      const artists = this.configManager.loadArtists();
-      this.logger.info(`Found ${artists.length} artists to scrape`);
-      
-      // Process each artist
-      for (const artist of artists) {
-        try {
-          this.logger.info(`Processing artist: @${artist}`);
-          
-          // Navigate to artist profile
-          await twitterScraper.navigateToProfileMediaTab(artist);
-          
-          // Check if account is private or suspended
-          if (await twitterScraper.isPrivateAccount()) {
-            this.logger.warn(`Skipping private account: @${artist}`);
-            continue;
-          }
-          
-          if (await twitterScraper.isSuspendedAccount()) {
-            this.logger.warn(`Skipping suspended account: @${artist}`);
-            continue;
-          }
-          
-          // Scroll and load media
-          await twitterScraper.scrollAndLoadMedia();
-          
-          // Extract image URLs
-          const imageDataList = await twitterScraper.extractImageUrls();
-          
-          if (imageDataList.length === 0) {
-            this.logger.warn(`No images found for @${artist}`);
-            continue;
-          }
-          
-          // Download images
-          const downloadResult = await twitterScraper.downloadImages(imageDataList);
-          
-          // Upload to Google Drive if enabled
-          if (this.googleDriveUploader && downloadResult.downloadedPaths.length > 0) {
-            try {
-              this.logger.info(`Starting batch upload of ${downloadResult.downloadedPaths.length} images for @${artist}`);
-              const uploadResult = await this.googleDriveUploader.batchUpload(downloadResult.downloadedPaths, artist);
-              this.logger.success(`Upload completed for @${artist}: ${uploadResult.successful}/${uploadResult.total} successful, ${uploadResult.failed} failed, ${uploadResult.skipped} skipped`);
-            } catch (error) {
-              this.logger.error(`Upload failed for @${artist}`, error as Error);
-              // Continue processing next artist even if upload fails
-            }
-          }
-          
-          // Add a delay between processing artists
-          await new Promise(resolve => setTimeout(resolve, scraperConfig.rateLimitDelay));
-        } catch (error) {
-          if (error instanceof ScraperError) {
-            this.logger.error(`Error processing artist @${artist}`, error, error.type);
-          } else {
-            this.logger.error(`Error processing artist @${artist}`, error as Error);
-          }
-          // Continue with next artist
-          continue;
-        }
+  public async run(processingMode: ProcessingMode = ProcessingMode.DISTRIBUTED): Promise<void> {
+      if (!this.browser) {
+          throw new Error('Scraper not initialized. Call initialize() first.');
       }
-      
-      // Log download stats
-      const stats = twitterScraper.getDownloadStats();
-      this.logger.success(`Scraping completed. Downloaded ${stats.successful}/${stats.total} images`);
-      
-      // Clean up old files based on retention policy (keep files for 3 days by default)
+
       try {
-        this.logger.info('Starting cleanup of files older than 3 days...');
-        await FileCleanup.cleanupOldFiles(scraperConfig.downloadPath, 3);
-        this.logger.info('File cleanup completed');
+          const authCredentials = this.configManager.getAuthCredentials();
+          const scraperConfig = this.configManager.getScraperConfig();
+          
+          // Get list of artists to scrape
+          const artists = this.configManager.loadArtists();
+          this.logger.info(`Found ${artists.length} artists to scrape using worker pool in ${processingMode.toUpperCase()} mode`);
+          
+          // Initialize worker pool
+          const workerPool = new WorkerPool(
+              this.browser,
+              authCredentials,
+              scraperConfig,
+              this.googleDriveUploader,
+              3 // 3 workers as requested
+          );
+          
+          await workerPool.initialize();
+          
+          try {
+              // Process all artists using specified processing mode
+              this.logger.info(`Starting ${processingMode} processing with worker pool...`);
+              const startTime = Date.now();
+              
+              // Use the specified processing mode
+              const results = await workerPool.processArtistsWithMode(artists, processingMode);
+              
+              const endTime = Date.now();
+              const totalTime = Math.round((endTime - startTime) / 1000);
+              
+              // Log detailed results
+              this.logWorkerResults(results);
+              
+              // Get aggregated statistics
+              const aggregatedStats = WorkerPool.getAggregatedStats(results);
+              
+              this.logger.success(
+                  `${processingMode.toUpperCase()} worker pool processing completed in ${totalTime} seconds:\n` +
+                  `  Artists: ${aggregatedStats.successfulArtists}/${aggregatedStats.totalArtists} successful, ` +
+                  `${aggregatedStats.skippedArtists} skipped, ${aggregatedStats.failedArtists} failed\n` +
+                  `  Downloads: ${aggregatedStats.downloadStats.successful}/${aggregatedStats.downloadStats.total} successful` +
+                  (aggregatedStats.uploadStats ? 
+                      `\n  Uploads: ${aggregatedStats.uploadStats.successful}/${aggregatedStats.uploadStats.total} successful` : '')
+              );
+              
+          } finally {
+              // Always clean up worker pool
+              await workerPool.cleanup();
+          }
+          
+          // Clean up old files based on retention policy
+          try {
+              this.logger.info('Starting cleanup of files older than 3 days...');
+              await FileCleanup.cleanupOldFiles(scraperConfig.downloadPath, 3);
+              this.logger.info('File cleanup completed');
+          } catch (error) {
+              this.logger.error('File cleanup failed', error as Error);
+          }
+          
       } catch (error) {
-        this.logger.error('File cleanup failed', error as Error);
-        // Continue execution - cleanup failure shouldn't halt the process
+          this.logger.error(`${processingMode} worker pool execution failed`, error as Error);
+          throw error;
+      } finally {
+          await this.cleanup();
       }
-      
-      // Logout
-      await twitterAuth.logout();
-    } catch (error) {
-      this.logger.error('Scraper execution failed', error as Error);
-      throw error;
-    } finally {
-      await this.cleanup();
-    }
   }
   
   /**
-   * Run scrape-only mode (without uploading to Google Drive)
+   * Run scrape-only mode using worker pool (without uploading to Google Drive)
    */
-  public async runScrapeOnly(): Promise<void> {
-    if (!this.browser || !this.context || !this.page) {
-      throw new Error('Scraper not initialized. Call initialize() first.');
-    }
-    
-    try {
-      const authCredentials = this.configManager.getAuthCredentials();
-      const scraperConfig = this.configManager.getScraperConfig();
-      
-      // Initialize authentication
-      const twitterAuth = new TwitterAuth(this.page, this.context, this.browser);
-      
-      // Login to Twitter
-      this.logger.info('Logging in to Twitter...');
-      await twitterAuth.login(authCredentials);
-      
-      // Initialize scraper
-      const twitterScraper = new TwitterScraper(
-        this.page,
-        this.context,
-        this.browser,
-        scraperConfig
-      );
-      
-      // Get list of artists to scrape
-      const artists = this.configManager.loadArtists();
-      this.logger.info(`Found ${artists.length} artists to scrape in scrape-only mode`);
-      
-      // Process each artist
-      for (const artist of artists) {
-        try {
-          this.logger.info(`Processing artist: @${artist}`);
-          
-          // Navigate to artist profile
-          await twitterScraper.navigateToProfileMediaTab(artist);
-          
-          // Check if account is private or suspended
-          if (await twitterScraper.isPrivateAccount()) {
-            this.logger.warn(`Skipping private account: @${artist}`);
-            continue;
-          }
-          
-          if (await twitterScraper.isSuspendedAccount()) {
-            this.logger.warn(`Skipping suspended account: @${artist}`);
-            continue;
-          }
-          
-          // Scroll and load media
-          await twitterScraper.scrollAndLoadMedia();
-          
-          // Extract image URLs
-          const imageDataList = await twitterScraper.extractImageUrls();
-          
-          if (imageDataList.length === 0) {
-            this.logger.warn(`No images found for @${artist}`);
-            continue;
-          }
-          
-          // Download images without uploading
-          const downloadResult = await twitterScraper.downloadImages(imageDataList);
-          this.logger.info(`Downloaded ${downloadResult.downloadedPaths.length} images for @${artist}`);
-          
-          // Add a delay between processing artists
-          await new Promise(resolve => setTimeout(resolve, scraperConfig.rateLimitDelay));
-        } catch (error) {
-          if (error instanceof ScraperError) {
-            this.logger.error(`Error processing artist @${artist}`, error, error.type);
-          } else {
-            this.logger.error(`Error processing artist @${artist}`, error as Error);
-          }
-          // Continue with next artist
-          continue;
-        }
+  public async runScrapeOnly(processingMode: ProcessingMode = ProcessingMode.DISTRIBUTED): Promise<void> {
+      if (!this.browser) {
+          throw new Error('Scraper not initialized. Call initialize() first.');
       }
-      
-      // Log download stats
-      const stats = twitterScraper.getDownloadStats();
-      this.logger.success(`Scrape-only completed. Downloaded ${stats.successful}/${stats.total} images`);
-      
-      // Logout
-      await twitterAuth.logout();
-    } catch (error) {
-      this.logger.error('Scrape-only execution failed', error as Error);
-      throw error;
-    } finally {
-      await this.cleanup();
-    }
+
+      try {
+          const authCredentials = this.configManager.getAuthCredentials();
+          const scraperConfig = this.configManager.getScraperConfig();
+          
+          // Get list of artists to scrape
+          const artists = this.configManager.loadArtists();
+          this.logger.info(`Found ${artists.length} artists to scrape in scrape-only mode using ${processingMode.toUpperCase()} worker pool`);
+          
+          // Initialize worker pool without Google Drive uploader
+          const workerPool = new WorkerPool(
+              this.browser,
+              authCredentials,
+              scraperConfig,
+              null, // No Google Drive uploader for scrape-only
+              3 // 3 workers as requested
+          );
+          
+          await workerPool.initialize();
+          
+          try {
+              // Process all artists using specified processing mode
+              this.logger.info(`Starting ${processingMode} scrape-only processing with worker pool...`);
+              const startTime = Date.now();
+              
+              // Use the specified processing mode
+              const results = await workerPool.processArtistsWithMode(artists, processingMode);
+              
+              const endTime = Date.now();
+              const totalTime = Math.round((endTime - startTime) / 1000);
+              
+              // Log detailed results
+              this.logWorkerResults(results);
+              
+              // Get aggregated statistics
+              const aggregatedStats = WorkerPool.getAggregatedStats(results);
+              
+              this.logger.success(
+                  `${processingMode.toUpperCase()} worker pool scrape-only completed in ${totalTime} seconds:\n` +
+                  `  Artists: ${aggregatedStats.successfulArtists}/${aggregatedStats.totalArtists} successful, ` +
+                  `${aggregatedStats.skippedArtists} skipped, ${aggregatedStats.failedArtists} failed\n` +
+                  `  Downloads: ${aggregatedStats.downloadStats.successful}/${aggregatedStats.downloadStats.total} successful`
+              );
+              
+          } finally {
+              // Always clean up worker pool
+              await workerPool.cleanup();
+          }
+          
+      } catch (error) {
+          this.logger.error(`${processingMode} scrape-only worker pool execution failed`, error as Error);
+          throw error;
+      } finally {
+          await this.cleanup();
+      }
   }
   
   /**
@@ -492,6 +427,31 @@ class TwitterImageScraper {
       this.logger.error('Failed to debug Google Drive', error as Error);
     }
   }
+
+  /**
+   * Log detailed results from worker processing
+   * Add this as a new private method in TwitterImageScraper class
+   */
+  private logWorkerResults(results: WorkerResult[]): void {
+      this.logger.info('\n=== WORKER PROCESSING RESULTS ===');
+      
+      for (const result of results) {
+          if (result.success) {
+              if (result.error) {
+                  this.logger.warn(`@${result.artist}: ${result.error}`);
+              } else {
+                  const downloadInfo = `${result.stats.successful}/${result.stats.total} downloads`;
+                  const uploadInfo = result.uploadResult ? 
+                      `, ${result.uploadResult.successful}/${result.uploadResult.total} uploads` : '';
+                  this.logger.success(`@${result.artist}: ${downloadInfo}${uploadInfo}`);
+              }
+          } else {
+              this.logger.error(`@${result.artist}: ${result.error || 'Unknown error'}`);
+          }
+      }
+      
+      this.logger.info('=== END WORKER RESULTS ===\n');
+  }
   
   /**
    * Clean up resources
@@ -519,100 +479,111 @@ class TwitterImageScraper {
  * Define CLI argument types
  */
 interface CliArgs {
-  'scrape-only'?: boolean;
-  scrapeOnly?: boolean;
-  's'?: boolean;
-  'upload-only'?: boolean;
-  uploadOnly?: boolean;
-  'u'?: boolean;
-  'debug-drive'?: boolean;
-  debugDrive?: boolean;
-  'd'?: boolean;
-  'help'?: boolean;
-  'h'?: boolean;
-  'version'?: boolean;
-  'v'?: boolean;
-  [key: string]: unknown;
+    'scrape-only'?: boolean;
+    scrapeOnly?: boolean;
+    's'?: boolean;
+    'upload-only'?: boolean;
+    uploadOnly?: boolean;
+    'u'?: boolean;
+    'debug-drive'?: boolean;
+    debugDrive?: boolean;
+    'd'?: boolean;
+    'processing-mode'?: string;
+    processingMode?: string;
+    'm'?: string;
+    'help'?: boolean;
+    'h'?: boolean;
+    'version'?: boolean;
+    'v'?: boolean;
+    [key: string]: unknown;
 }
 
-/**
- * Entry point for the application
- */
 async function main(): Promise<void> {
-  // Parse command line arguments
-  const argv = yargs(hideBin(process.argv))
-    .scriptName('twitter-image-scraper')
-    .usage('$0 [options]')
-    .option('scrape-only', {
-      alias: 's',
-      type: 'boolean',
-      description: 'Run in scrape-only mode (no Google Drive upload)'
-    })
-    .option('upload-only', {
-      alias: 'u',
-      type: 'boolean',
-      description: 'Run in upload-only mode (upload existing images without scraping)'
-    })
-    .option('debug-drive', {
-      alias: 'd',
-      type: 'boolean',
-      description: 'Test Google Drive configuration and permissions'
-    })
-    .help()
-    .alias('help', 'h')
-    .version()
-    .alias('version', 'v')
-    .strict()
-    .parseSync() as CliArgs;
-    
-  // If help or version was requested, exit early (yargs will have printed the info)
-  if (argv.help || argv.h || argv.version || argv.v) {
-    process.exit(0);
-  }
+    // Parse command line arguments
+    const argv = yargs(hideBin(process.argv))
+        .scriptName('twitter-image-scraper')
+        .usage('$0 [options]')
+        .option('scrape-only', {
+            alias: 's',
+            type: 'boolean',
+            description: 'Run in scrape-only mode (no Google Drive upload)'
+        })
+        .option('upload-only', {
+            alias: 'u',
+            type: 'boolean',
+            description: 'Run in upload-only mode (upload existing images without scraping)'
+        })
+        .option('debug-drive', {
+            alias: 'd',
+            type: 'boolean',
+            description: 'Test Google Drive configuration and permissions'
+        })
+        .option('processing-mode', {
+            alias: 'm',
+            type: 'string',
+            choices: ['distributed', 'max_concurrent', 'batched'],
+            default: 'distributed',
+            description: 'Worker processing mode: distributed (round-robin), max_concurrent (grab next), batched (controlled batches)'
+        })
+        .help()
+        .alias('help', 'h')
+        .version()
+        .alias('version', 'v')
+        .strict()
+        .parseSync() as CliArgs;
+        
+    // If help or version was requested, exit early (yargs will have printed the info)
+    if (argv.help || argv.h || argv.version || argv.v) {
+        process.exit(0);
+    }
 
-  const scraper = new TwitterImageScraper();
-  
-  try {
-    const isScrapeOnly = argv['scrape-only'] || argv.scrapeOnly || argv.s;
-    const isUploadOnly = argv['upload-only'] || argv.uploadOnly || argv.u;
-    const isDebugDrive = argv['debug-drive'] || argv.debugDrive || argv.d;
+    const scraper = new TwitterImageScraper();
     
-    // Debug mode takes precedence
-    if (isDebugDrive) {
-      console.log('Running in Google Drive debug mode...');
-      await scraper.debugGoogleDrive();
-      process.exit(0);
-      return;
+    try {
+        const isScrapeOnly = argv['scrape-only'] || argv.scrapeOnly || argv.s;
+        const isUploadOnly = argv['upload-only'] || argv.uploadOnly || argv.u;
+        const isDebugDrive = argv['debug-drive'] || argv.debugDrive || argv.d;
+        
+        // Get processing mode
+        const processingModeStr = argv['processing-mode'] || argv.processingMode || argv.m || 'distributed';
+        const processingMode = processingModeStr as ProcessingMode;
+        
+        // Debug mode takes precedence
+        if (isDebugDrive) {
+            console.log('Running in Google Drive debug mode...');
+            await scraper.debugGoogleDrive();
+            process.exit(0);
+            return;
+        }
+        
+        // Check for conflicting flags
+        if (isScrapeOnly && isUploadOnly) {
+            console.error('Error: Cannot use both --scrape-only and --upload-only flags together');
+            process.exit(1);
+        }
+        
+        // Initialize scraper (not needed for upload-only mode)
+        if (!isUploadOnly) {
+            await scraper.initialize();
+        }
+        
+        // Determine which mode to run
+        if (isScrapeOnly) {
+            console.log(`Running in scrape-only mode with ${processingMode} processing...`);
+            await scraper.runScrapeOnly(processingMode);
+        } else if (isUploadOnly) {
+            console.log('Running in upload-only mode...');
+            await scraper.runUploadOnly();
+        } else {
+            console.log(`Running in full mode (scrape + upload) with ${processingMode} processing...`);
+            await scraper.run(processingMode);
+        }
+        
+        process.exit(0);
+    } catch (error) {
+        console.error('Fatal error:', error);
+        process.exit(1);
     }
-    
-    // Check for conflicting flags
-    if (isScrapeOnly && isUploadOnly) {
-      console.error('Error: Cannot use both --scrape-only and --upload-only flags together');
-      process.exit(1);
-    }
-    
-    // Initialize scraper (not needed for upload-only mode)
-    if (!isUploadOnly) {
-      await scraper.initialize();
-    }
-    
-    // Determine which mode to run
-    if (isScrapeOnly) {
-      console.log('Running in scrape-only mode...');
-      await scraper.runScrapeOnly();
-    } else if (isUploadOnly) {
-      console.log('Running in upload-only mode...');
-      await scraper.runUploadOnly();
-    } else {
-      console.log('Running in full mode (scrape + upload)...');
-      await scraper.run();
-    }
-    
-    process.exit(0);
-  } catch (error) {
-    console.error('Fatal error:', error);
-    process.exit(1);
-  }
 }
 
 // Run the main function if this file is being executed directly

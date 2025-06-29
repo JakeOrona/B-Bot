@@ -17,7 +17,15 @@
     "test:ui": "npx playwright test --ui",
     "test:debug": "npx playwright test --debug",
     "test:headed": "npx playwright test --headed",
-    "dev": "ts-node-dev --respawn src/index.ts"
+    "dev": "ts-node-dev --respawn src/index.ts",
+    
+    "start:distributed": "ts-node src/index.ts --processing-mode distributed",
+    "start:concurrent": "ts-node src/index.ts --processing-mode max_concurrent",
+    "start:batched": "ts-node src/index.ts --processing-mode batched",
+    
+    "scrape:distributed": "ts-node src/index.ts --scrape-only --processing-mode distributed",
+    "scrape:concurrent": "ts-node src/index.ts --scrape-only --processing-mode max_concurrent",
+    "scrape:batched": "ts-node src/index.ts --scrape-only --processing-mode batched"
   },
   "keywords": [],
   "author": "",
