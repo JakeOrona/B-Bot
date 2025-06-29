@@ -143,22 +143,22 @@ export class ArtistWorker {
             const imageCount = await twitterScraper.scrollAndLoadMedia();
             this.logger.info(`Worker ${this.workerId}: Found ${imageCount} images for @${artist}`);
             
-            // Extract image URLs
-            const imageDataList = await twitterScraper.extractImageUrls();
-            
-            if (imageDataList.length === 0) {
-                this.logger.warn(`Worker ${this.workerId}: No images found for @${artist}`);
+            // Extract all media (images and videos)
+            const mediaData = await twitterScraper.extractAllMedia();
+
+            if (mediaData.images.length === 0 && mediaData.videos.length === 0) {
+                this.logger.warn(`No media found for @${artist}`);
                 return {
-                    artist,
-                    success: true,
-                    stats: { total: 0, successful: 0, failed: 0, skipped: 0 },
-                    error: 'No images found'
+                    artist: artist,
+                    success: false,
+                    stats: { successful: 0, failed: 0, skipped: 0, total: 0 },
                 };
             }
-            
-            // Download images
-            this.logger.info(`Worker ${this.workerId}: Downloading ${imageDataList.length} images for @${artist}`);
-            const downloadResult = await twitterScraper.downloadImages(imageDataList);
+
+            this.logger.info(`Found ${mediaData.images.length} images and ${mediaData.videos.length} videos for @${artist}`);
+
+            // Download all media
+            const downloadResult = await twitterScraper.downloadAllMedia(mediaData);
             
             let uploadResult = undefined;
             
@@ -188,12 +188,12 @@ export class ArtistWorker {
                 }
             }
             
-            this.logger.success(`Worker ${this.workerId}: Completed processing @${artist} - Downloaded: ${downloadResult.stats.successful}/${downloadResult.stats.total}`);
+            this.logger.success(`Worker ${this.workerId}: Completed processing @${artist} - Downloaded: ${downloadResult.imageStats.successful}/${downloadResult.imageStats.total}`);
             
             return {
                 artist,
                 success: true,
-                stats: downloadResult.stats,
+                stats: downloadResult.imageStats,
                 uploadResult
             };
             

@@ -321,104 +321,105 @@ export class TwitterScraper extends BasePage {
       }
   }
 
-  /**
-   * Extract video URLs from the current page
-   * @returns Array of video data objects
-   */
-  public async extractVideoUrls(): Promise<VideoData[]> {
-      try {
-          this.logger.info(`Extracting video URLs from ${this.currentUsername}'s media`);
-          
-          const videoData = await this.page.evaluate((username) => {
-              const videos: Array<{url: string, tweetId: string, username: string, index: number, type: 'mp4' | 'gif' | 'm3u8', quality?: string, thumbnail?: string}> = [];
-              
-              // Method 1: Look for video elements with actual sources
-              const videoElements = document.querySelectorAll('video[src], video source[src]');
-              console.log(`Found ${videoElements.length} video elements with sources`);
-              
-              videoElements.forEach((element, index) => {
-                  const src = element.getAttribute('src');
-                  if (src && src.includes('video.twimg.com')) {
-                      // Find parent tweet container
-                      const tweetContainer = element.closest('article[data-testid="tweet"]') || 
-                                          element.closest('div[data-testid="cellInnerDiv"]');
-                      
-                      let tweetId = 'unknown';
-                      if (tweetContainer) {
-                          const linkElement = tweetContainer.querySelector('a[href*="/status/"]');
-                          if (linkElement) {
-                              const href = linkElement.getAttribute('href');
-                              const match = href?.match(/\/status\/(\d+)/);
-                              if (match) tweetId = match[1];
-                          }
-                      }
-                      
-                      videos.push({
-                          url: src,
-                          tweetId,
-                          username,
-                          index,
-                          type: src.includes('.gif') ? 'gif' : 'mp4',
-                          thumbnail: element.getAttribute('poster') || undefined
-                      });
-                  }
-              });
-              
-              // Method 2: Look for data attributes containing video URLs
-              const tweetsWithVideo = document.querySelectorAll('article[data-testid="tweet"]');
-              
-              tweetsWithVideo.forEach((tweet, tweetIndex) => {
-                  // Look for video thumbnails to identify video tweets
-                  const videoThumbs = tweet.querySelectorAll('img[src*="amplify_video_thumb"], img[src*="tweet_video_thumb"]');
-                  
-                  if (videoThumbs.length > 0) {
-                      // Extract tweet ID
-                      let tweetId = 'unknown';
-                      const linkElement = tweet.querySelector('a[href*="/status/"]');
-                      if (linkElement) {
-                          const href = linkElement.getAttribute('href');
-                          const match = href?.match(/\/status\/(\d+)/);
-                          if (match) tweetId = match[1];
-                      }
-                      
-                      videoThumbs.forEach((thumb, thumbIndex) => {
-                          const thumbSrc = thumb.getAttribute('src');
-                          if (thumbSrc) {
-                              // Extract video ID from thumbnail
-                              const videoIdMatch = thumbSrc.match(/(?:amplify_video_thumb|tweet_video_thumb)\/(\d+)/);
-                              if (videoIdMatch) {
-                                  const videoId = videoIdMatch[1];
-                                  
-                                  // Store video info for later processing
-                                  videos.push({
-                                      url: `VIDEO_ID:${videoId}`, // Placeholder - will be resolved later
-                                      tweetId,
-                                      username,
-                                      index: videos.length,
-                                      type: 'mp4',
-                                      thumbnail: thumbSrc
-                                  });
-                              }
-                          }
-                      });
-                  }
-              });
-              
-              return videos;
-          }, this.currentUsername);
-          
-          // Process video IDs to get actual URLs
-          const processedVideos = await this.resolveVideoUrls(videoData);
-          
-          this.logger.info(`Extracted ${processedVideos.length} video URLs`);
-          return processedVideos;
-      } catch (error) {
-          throw new ScraperError(
-              `Failed to extract video URLs: ${(error as Error).message}`,
-              ScraperErrorType.SCRAPING_ERROR
-          );
-      }
-  }
+/**
+ * Extract video URLs from the current page
+ * @returns Array of video data objects
+ */
+public async extractVideoUrls(): Promise<VideoData[]> {
+    try {
+        this.logger.info(`Extracting video URLs from ${this.currentUsername}'s media`);
+        
+        const videoData = await this.page.evaluate((username) => {
+            const videos: Array<{url: string, tweetId: string, username: string, index: number, type: 'mp4' | 'gif' | 'm3u8', thumbnail?: string}> = [];
+            
+            // Look for video indicators in tweets
+            const tweets = document.querySelectorAll('article[data-testid="tweet"], div[data-testid="cellInnerDiv"]');
+            
+            tweets.forEach((tweet, tweetIndex) => {
+                // Extract tweet ID
+                let tweetId = 'unknown';
+                const linkElement = tweet.querySelector('a[href*="/status/"]');
+                if (linkElement) {
+                    const href = linkElement.getAttribute('href');
+                    const match = href?.match(/\/status\/(\d+)/);
+                    if (match) tweetId = match[1];
+                }
+                
+                // Method 1: Look for video play buttons/overlays
+                const videoIndicators = tweet.querySelectorAll([
+                    '[data-testid="videoComponent"]',
+                    '[data-testid="videoPlayer"]', 
+                    'div[aria-label*="video"]',
+                    'div[aria-label*="Play"]',
+                    '.r-1p0dtai[aria-label*="Play"]', // Twitter's play button class
+                    'svg[aria-label="Play"]'
+                ].join(','));
+                
+                if (videoIndicators.length > 0) {
+                    console.log(`Found ${videoIndicators.length} video indicators in tweet ${tweetId}`);
+                    
+                    videoIndicators.forEach((indicator, index) => {
+                        // Look for thumbnail in nearby img elements
+                        const container = indicator.closest('div');
+                        const thumbnail = container?.querySelector('img[src*="video"], img[src*="amplify"]');
+                        
+                        videos.push({
+                            url: `VIDEO_PLACEHOLDER:${tweetId}_${index}`,
+                            tweetId,
+                            username,
+                            index: videos.length,
+                            type: 'mp4',
+                            thumbnail: thumbnail?.getAttribute('src') || undefined
+                        });
+                    });
+                }
+                
+                const gifIndicators = tweet.querySelectorAll([
+                    'div[aria-label*="GIF"]',
+                    '.r-1p0dtai[aria-label*="GIF"]'
+                ].join(','));
+
+                // Add text-based GIF detection separately
+                const textElements = tweet.querySelectorAll('span, div');
+                textElements.forEach(el => {
+                    if (el.textContent && el.textContent.includes('GIF')) {
+                        // Add to gifIndicators logic here if needed
+                    }
+                });
+                
+                if (gifIndicators.length > 0) {
+                    console.log(`Found ${gifIndicators.length} GIF indicators in tweet ${tweetId}`);
+                    
+                    gifIndicators.forEach((indicator, index) => {
+                        videos.push({
+                            url: `GIF_PLACEHOLDER:${tweetId}_${index}`,
+                            tweetId,
+                            username,
+                            index: videos.length,
+                            type: 'gif'
+                        });
+                    });
+                }
+            });
+            
+            console.log(`Total video placeholders found: ${videos.length}`);
+            return videos;
+        }, this.currentUsername);
+        
+        this.logger.info(`Found ${videoData.length} video indicators`);
+        
+        // Try to resolve actual video URLs
+        const resolvedVideos = await this.resolveVideoUrls(videoData);
+        
+        this.logger.info(`Extracted ${resolvedVideos.length} video URLs`);
+        return resolvedVideos;
+    } catch (error) {
+        throw new ScraperError(
+            `Failed to extract video URLs: ${(error as Error).message}`,
+            ScraperErrorType.SCRAPING_ERROR
+        );
+    }
+}
 
   /**
    * Resolve video IDs to actual downloadable URLs

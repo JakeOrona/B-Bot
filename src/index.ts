@@ -147,7 +147,7 @@ class TwitterImageScraper {
               const results = await workerPool.processArtistsWithMode(artists, processingMode);
               
               const endTime = Date.now();
-              const totalTime = Math.round((endTime - startTime) / 1000);
+              const totalTime = Math.round(((endTime - startTime) / 1000)/60); // Convert to minutes
               
               // Log detailed results
               this.logWorkerResults(results);
