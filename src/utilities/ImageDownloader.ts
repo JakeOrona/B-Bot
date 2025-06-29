@@ -5,7 +5,7 @@
 import fs from 'fs';
 import path from 'path';
 import https from 'https';
-import { ImageData, DownloadStats, ScraperError, ScraperErrorType } from '../interfaces/ScraperTypes';
+import { ImageData, DownloadStats, ScraperError, ScraperErrorType, VideoData } from '../interfaces/ScraperTypes';
 
 export class ImageDownloader {
   private baseDir: string;
@@ -125,5 +125,53 @@ export class ImageDownloader {
    */
   public getStats(): DownloadStats {
     return { ...this.stats };
+  }
+
+  /**
+   * Download a video from a URL
+   * @param videoData Video data containing URL, tweet ID, username and index
+   * @returns Promise resolving to the path where the video was saved
+   */
+  public async downloadVideo(videoData: VideoData): Promise<string> {
+      const { url, tweetId, username, index, type } = videoData;
+      this.stats.total++;
+      
+      // Create user-specific directory if it doesn't exist
+      const userDir = path.join(this.baseDir, username);
+      if (!fs.existsSync(userDir)) {
+          fs.mkdirSync(userDir, { recursive: true });
+      }
+      
+      // Determine file extension
+      let extension = 'mp4';
+      if (type === 'gif') {
+          extension = 'gif';
+      } else if (url.includes('.m3u8')) {
+          extension = 'm3u8';
+      }
+      
+      // Create the filename: username_tweetId_video_index.extension
+      const filename = `${username}_${tweetId}_video_${index}.${extension}`;
+      const filepath = path.join(userDir, filename);
+      
+      // Check if file already exists
+      if (fs.existsSync(filepath)) {
+          this.stats.skipped++;
+          console.log(`Skipped existing video: ${filename}`);
+          return filepath;
+      }
+      
+      try {
+          await this.downloadFile(url, filepath);
+          this.stats.successful++;
+          console.log(`Successfully downloaded video: ${filename}`);
+          return filepath;
+      } catch (error) {
+          this.stats.failed++;
+          throw new ScraperError(
+              `Failed to download video ${url}: ${(error as Error).message}`,
+              ScraperErrorType.DOWNLOAD_ERROR
+          );
+      }
   }
 }

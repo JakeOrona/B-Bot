@@ -4,7 +4,7 @@
 
 import { Browser, BrowserContext, Page } from 'playwright';
 import { BasePage } from './BasePage';
-import { ImageData, ScraperConfig, ScraperError, ScraperErrorType } from '../interfaces/ScraperTypes';
+import { ImageData, ScraperConfig, ScraperError, ScraperErrorType, MediaData, VideoData } from '../interfaces/ScraperTypes';
 import { ImageDownloader } from '../utilities/ImageDownloader';
 import { GoogleDriveUploader } from '../utilities/GoogleDriveUploader';
 import { FileCleanup } from '../utilities/FileCleanup';
@@ -295,6 +295,236 @@ export class TwitterScraper extends BasePage {
       );
     }
   }
+
+  /**
+   * Extract both images and videos from the current page
+   * @returns Combined media data
+   */
+  public async extractAllMedia(): Promise<MediaData> {
+      try {
+          this.logger.info(`Extracting all media from ${this.currentUsername}'s timeline`);
+          
+          // Extract images using existing method
+          const images = await this.extractImageUrls();
+          
+          // Extract videos using new method
+          const videos = await this.extractVideoUrls();
+          
+          this.logger.info(`Found ${images.length} images and ${videos.length} videos`);
+          
+          return { images, videos };
+      } catch (error) {
+          throw new ScraperError(
+              `Failed to extract media: ${(error as Error).message}`,
+              ScraperErrorType.SCRAPING_ERROR
+          );
+      }
+  }
+
+  /**
+   * Extract video URLs from the current page
+   * @returns Array of video data objects
+   */
+  public async extractVideoUrls(): Promise<VideoData[]> {
+      try {
+          this.logger.info(`Extracting video URLs from ${this.currentUsername}'s media`);
+          
+          const videoData = await this.page.evaluate((username) => {
+              const videos: Array<{url: string, tweetId: string, username: string, index: number, type: 'mp4' | 'gif' | 'm3u8', quality?: string, thumbnail?: string}> = [];
+              
+              // Method 1: Look for video elements with actual sources
+              const videoElements = document.querySelectorAll('video[src], video source[src]');
+              console.log(`Found ${videoElements.length} video elements with sources`);
+              
+              videoElements.forEach((element, index) => {
+                  const src = element.getAttribute('src');
+                  if (src && src.includes('video.twimg.com')) {
+                      // Find parent tweet container
+                      const tweetContainer = element.closest('article[data-testid="tweet"]') || 
+                                          element.closest('div[data-testid="cellInnerDiv"]');
+                      
+                      let tweetId = 'unknown';
+                      if (tweetContainer) {
+                          const linkElement = tweetContainer.querySelector('a[href*="/status/"]');
+                          if (linkElement) {
+                              const href = linkElement.getAttribute('href');
+                              const match = href?.match(/\/status\/(\d+)/);
+                              if (match) tweetId = match[1];
+                          }
+                      }
+                      
+                      videos.push({
+                          url: src,
+                          tweetId,
+                          username,
+                          index,
+                          type: src.includes('.gif') ? 'gif' : 'mp4',
+                          thumbnail: element.getAttribute('poster') || undefined
+                      });
+                  }
+              });
+              
+              // Method 2: Look for data attributes containing video URLs
+              const tweetsWithVideo = document.querySelectorAll('article[data-testid="tweet"]');
+              
+              tweetsWithVideo.forEach((tweet, tweetIndex) => {
+                  // Look for video thumbnails to identify video tweets
+                  const videoThumbs = tweet.querySelectorAll('img[src*="amplify_video_thumb"], img[src*="tweet_video_thumb"]');
+                  
+                  if (videoThumbs.length > 0) {
+                      // Extract tweet ID
+                      let tweetId = 'unknown';
+                      const linkElement = tweet.querySelector('a[href*="/status/"]');
+                      if (linkElement) {
+                          const href = linkElement.getAttribute('href');
+                          const match = href?.match(/\/status\/(\d+)/);
+                          if (match) tweetId = match[1];
+                      }
+                      
+                      videoThumbs.forEach((thumb, thumbIndex) => {
+                          const thumbSrc = thumb.getAttribute('src');
+                          if (thumbSrc) {
+                              // Extract video ID from thumbnail
+                              const videoIdMatch = thumbSrc.match(/(?:amplify_video_thumb|tweet_video_thumb)\/(\d+)/);
+                              if (videoIdMatch) {
+                                  const videoId = videoIdMatch[1];
+                                  
+                                  // Store video info for later processing
+                                  videos.push({
+                                      url: `VIDEO_ID:${videoId}`, // Placeholder - will be resolved later
+                                      tweetId,
+                                      username,
+                                      index: videos.length,
+                                      type: 'mp4',
+                                      thumbnail: thumbSrc
+                                  });
+                              }
+                          }
+                      });
+                  }
+              });
+              
+              return videos;
+          }, this.currentUsername);
+          
+          // Process video IDs to get actual URLs
+          const processedVideos = await this.resolveVideoUrls(videoData);
+          
+          this.logger.info(`Extracted ${processedVideos.length} video URLs`);
+          return processedVideos;
+      } catch (error) {
+          throw new ScraperError(
+              `Failed to extract video URLs: ${(error as Error).message}`,
+              ScraperErrorType.SCRAPING_ERROR
+          );
+      }
+  }
+
+  /**
+   * Resolve video IDs to actual downloadable URLs
+   * @param videoData Array of video data with potential placeholders
+   * @returns Array of video data with resolved URLs
+   */
+  private async resolveVideoUrls(videoData: VideoData[]): Promise<VideoData[]> {
+      const resolvedVideos: VideoData[] = [];
+      
+      for (const video of videoData) {
+          if (video.url.startsWith('VIDEO_ID:')) {
+              // Extract video ID and resolve to actual URL
+              const videoId = video.url.replace('VIDEO_ID:', '');
+              const resolvedUrl = await this.findWorkingVideoUrl(videoId);
+              
+              if (resolvedUrl) {
+                  resolvedVideos.push({
+                      ...video,
+                      url: resolvedUrl
+                  });
+              }
+          } else {
+              // URL is already resolved
+              resolvedVideos.push(video);
+          }
+      }
+      
+      return resolvedVideos;
+  }
+
+  /**
+   * Find working video URL for a given video ID using network interception
+   * @param videoId The video ID to resolve
+   * @returns Working video URL or null
+   */
+  private async findWorkingVideoUrl(videoId: string): Promise<string | null> {
+      try {
+          // Set up network interception to catch video requests
+          const videoUrls: string[] = [];
+          
+          const responseHandler = (response: any) => {
+              const url = response.url();
+              if (url.includes('video.twimg.com') && 
+                  (url.includes('.mp4') || url.includes('.m3u8')) &&
+                  url.includes(videoId)) {
+                  videoUrls.push(url);
+              }
+          };
+          
+          this.page.on('response', responseHandler);
+          
+          // Try to trigger video loading by clicking on video area
+          const videoSelectors = [
+              `img[src*="${videoId}"]`,
+              `div[data-testid="videoPlayer"]`,
+              `video[poster*="${videoId}"]`
+          ];
+          
+          for (const selector of videoSelectors) {
+              try {
+                  const element = await this.page.locator(selector).first();
+                  if (await element.isVisible()) {
+                      await element.click();
+                      await this.wait(1000); // Wait for network requests
+                      break;
+                  }
+              } catch (error) {
+                  // Continue to next selector
+              }
+          }
+          
+          // Clean up event listener
+          this.page.off('response', responseHandler);
+          
+          // Return the best quality URL found
+          if (videoUrls.length > 0) {
+              // Prefer MP4 over m3u8, and higher quality
+              const mp4Urls = videoUrls.filter(url => url.includes('.mp4'));
+              if (mp4Urls.length > 0) {
+                  // Sort by quality (higher resolution first)
+                  mp4Urls.sort((a, b) => {
+                      const aRes = this.extractResolution(a);
+                      const bRes = this.extractResolution(b);
+                      return bRes - aRes;
+                  });
+                  return mp4Urls[0];
+              }
+              return videoUrls[0];
+          }
+          
+          return null;
+      } catch (error) {
+          this.logger.warn(`Failed to resolve video URL for ${videoId}: ${(error as Error).message}`);
+          return null;
+      }
+  }
+
+  /**
+   * Extract resolution number from video URL for sorting
+   * @param url Video URL
+   * @returns Resolution as number (e.g., 1080 for 1080p)
+   */
+  private extractResolution(url: string): number {
+      const match = url.match(/(\d+)x\d+/);
+      return match ? parseInt(match[1]) : 0;
+  }
   
   /**
    * Download extracted images
@@ -395,6 +625,54 @@ export class TwitterScraper extends BasePage {
       stats: { successful, failed, skipped, total: imageDataList.length },
       downloadedPaths: this.downloadedImagePaths
     };
+  }
+
+  /**
+   * Download all media (images and videos)
+   * @param mediaData Combined media data to download
+   * @returns Download statistics
+   */
+  public async downloadAllMedia(mediaData: MediaData): Promise<{
+      imageStats: { successful: number; failed: number; skipped: number; total: number };
+      videoStats: { successful: number; failed: number; skipped: number; total: number };
+      downloadedPaths: string[];
+  }> {
+      const downloadedPaths: string[] = [];
+      
+      // Download images
+      const imageResult = await this.downloadImages(mediaData.images);
+      downloadedPaths.push(...imageResult.downloadedPaths);
+      
+      // Download videos
+      let videoStats = { successful: 0, failed: 0, skipped: 0, total: mediaData.videos.length };
+      
+      for (const video of mediaData.videos) {
+          try {
+              const localPath = await this.imageDownloader.downloadVideo(video);
+              videoStats.successful++;
+              downloadedPaths.push(localPath);
+              
+              if (videoStats.successful % 5 === 0) {
+                  this.logger.info(`Downloaded ${videoStats.successful}/${videoStats.total} videos`);
+              }
+          } catch (error) {
+              videoStats.failed++;
+              this.logger.error(`Failed to download video ${video.url}`, error as Error);
+          }
+          
+          // Rate limiting
+          await this.wait(this.config.rateLimitDelay);
+      }
+      
+      this.logger.success(
+          `Media download complete: ${imageResult.stats.successful} images, ${videoStats.successful} videos`
+      );
+      
+      return {
+          imageStats: imageResult.stats,
+          videoStats,
+          downloadedPaths
+      };
   }
   
   /**

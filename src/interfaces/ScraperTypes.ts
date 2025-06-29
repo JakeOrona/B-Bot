@@ -113,3 +113,24 @@ export interface UploadResult {
   skipped: number;
   total: number;
 }
+
+/**
+ * Video data structure
+ */
+export interface VideoData {
+    url: string;
+    tweetId: string;
+    username: string;
+    index: number;
+    type: 'mp4' | 'gif' | 'm3u8';
+    quality?: string;
+    thumbnail?: string;
+}
+
+/**
+ * Combined media data structure
+ */
+export interface MediaData {
+    images: ImageData[];
+    videos: VideoData[];
+}
