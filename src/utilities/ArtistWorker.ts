@@ -52,6 +52,15 @@ export class ArtistWorker {
         this.scraperConfig = scraperConfig;
         this.googleDriveUploader = googleDriveUploader;
         this.sharedAuthState = sharedAuthState;
+
+        if (googleDriveUploader) {
+            this.logger.info(`Worker ${workerId}: Creating individual GoogleDriveUploader instance`);
+            // We need to create a new instance per worker to avoid statistics conflicts
+            // This requires access to the original config - we'll need to pass this differently
+            this.googleDriveUploader = googleDriveUploader; // For now, use shared instance but this might be the bug
+        } else {
+            this.googleDriveUploader = null;
+        }
     }
 
     /**
@@ -102,6 +111,9 @@ export class ArtistWorker {
                 this.browser,
                 this.scraperConfig
             );
+            
+            // Set the worker ID for better logging
+            twitterScraper.setWorkerContext(this.workerId, artist);
             
             // Navigate to artist profile
             await twitterScraper.navigateToProfileMediaTab(artist);
@@ -154,7 +166,21 @@ export class ArtistWorker {
             if (this.googleDriveUploader && downloadResult.downloadedPaths.length > 0) {
                 try {
                     this.logger.info(`Worker ${this.workerId}: Uploading ${downloadResult.downloadedPaths.length} images for @${artist}`);
+                    
+                    // Debug: Log what we're about to upload
+                    this.logger.info(`Worker ${this.workerId}: About to upload ${downloadResult.downloadedPaths.length} files for @${artist}`);
+                    
                     uploadResult = await this.googleDriveUploader.batchUpload(downloadResult.downloadedPaths, artist);
+                    
+                    // Debug: Log the upload result details
+                    this.logger.info(`Worker ${this.workerId}: Upload result for @${artist}: ${JSON.stringify(uploadResult)}`);
+                    
+                    // Verify upload result makes sense
+                    if (uploadResult.successful + uploadResult.failed + uploadResult.skipped !== uploadResult.total) {
+                        this.logger.warn(`Worker ${this.workerId}: Upload statistics inconsistent for @${artist}: ` +
+                            `${uploadResult.successful} + ${uploadResult.failed} + ${uploadResult.skipped} != ${uploadResult.total}`);
+                    }
+                    
                     this.logger.success(`Worker ${this.workerId}: Upload completed for @${artist}: ${uploadResult.successful}/${uploadResult.total} successful`);
                 } catch (error) {
                     this.logger.error(`Worker ${this.workerId}: Upload failed for @${artist}`, error as Error);

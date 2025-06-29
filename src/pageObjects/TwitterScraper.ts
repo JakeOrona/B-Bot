@@ -17,6 +17,8 @@ export class TwitterScraper extends BasePage {
   private googleDriveUploader?: GoogleDriveUploader;
   private currentUsername: string = '';
   private downloadedImagePaths: string[] = [];
+  private workerId?: number;
+  private contextArtist?: string;
   
   /**
    * Constructor for TwitterScraper
@@ -118,52 +120,55 @@ export class TwitterScraper extends BasePage {
    * @returns Number of images found
    */
   public async scrollAndLoadMedia(maxScrolls: number = this.config.maxScrolls): Promise<number> {
-    try {
-      let previousHeight = 0;
-      let scrollCount = 0;
-      let sameHeightCount = 0;
-      
-      this.logger.info(`Starting to scroll and load media for ${this.currentUsername}`);
-      
-      while (scrollCount < maxScrolls && sameHeightCount < 3) {
-        // Get current scroll height
-        const currentHeight = await this.page.evaluate(() => document.body.scrollHeight);
-        
-        // If we've reached the bottom (same height multiple times), stop scrolling
-        if (currentHeight === previousHeight) {
-          sameHeightCount++;
-        } else {
-          sameHeightCount = 0;
-        }
-        
-        // Scroll to bottom of page
-        await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
-        await this.wait(this.config.delayBetweenScrolls);
-        
-        previousHeight = currentHeight;
-        scrollCount++;
-        
-        // Log progress
-        if (scrollCount % 5 === 0) {
-          this.logger.info(`Scrolled ${scrollCount}/${maxScrolls} times`);
-        }
+      try {
+          let previousHeight = 0;
+          let scrollCount = 0;
+          let sameHeightCount = 0;
+          
+          const logPrefix = this.workerId ? `Worker ${this.workerId}` : '';
+          const artistName = this.contextArtist || this.currentUsername;
+          
+          this.logger.info(`${logPrefix ? logPrefix + ': ' : ''}Starting to scroll and load media for ${artistName}`);
+          
+          while (scrollCount < maxScrolls && sameHeightCount < 3) {
+              // Get current scroll height
+              const currentHeight = await this.page.evaluate(() => document.body.scrollHeight);
+              
+              // If we've reached the bottom (same height multiple times), stop scrolling
+              if (currentHeight === previousHeight) {
+                  sameHeightCount++;
+              } else {
+                  sameHeightCount = 0;
+              }
+              
+              // Scroll to bottom of page
+              await this.page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+              await this.wait(this.config.delayBetweenScrolls);
+              
+              previousHeight = currentHeight;
+              scrollCount++;
+              
+              // Log progress with worker and artist context
+              if (scrollCount % 5 === 0) {
+                  this.logger.info(`${logPrefix ? logPrefix + ': ' : ''}${artistName} scrolled ${scrollCount}/${maxScrolls} times`);
+              }
+          }
+          
+          // Count the number of images found using updated selector for Twitter media images
+          const imageCount = await this.page.evaluate(() => {
+              const images = document.querySelectorAll('img[src*="pbs.twimg.com"]');
+              console.log(`Twitter media images found during scroll: ${images.length}`);
+              return images.length;
+          });
+          
+          this.logger.info(`${logPrefix ? logPrefix + ': ' : ''}Found ${imageCount} images after scrolling ${scrollCount} times for ${artistName}`);
+          return imageCount;
+      } catch (error) {
+          throw new ScraperError(
+              `Error while scrolling for media: ${(error as Error).message}`,
+              ScraperErrorType.SCRAPING_ERROR
+          );
       }
-      
-      // Count the number of images found using updated selector for Twitter media images
-      const imageCount = await this.page.evaluate(() => {
-        const images = document.querySelectorAll('img[src*="pbs.twimg.com"]');
-        console.log(`Twitter media images found during scroll: ${images.length}`);
-        return images.length;
-      });
-      
-      this.logger.info(`Found ${imageCount} images after scrolling ${scrollCount} times`);
-      return imageCount;
-    } catch (error) {
-      throw new ScraperError(
-        `Error while scrolling for media: ${(error as Error).message}`,
-        ScraperErrorType.SCRAPING_ERROR
-      );
-    }
   }
   
   /**
@@ -443,6 +448,16 @@ export class TwitterScraper extends BasePage {
       this.cellDivLocator,
       this.page.locator('[data-testid*="tweet"]')
     ];
+  }
+
+  /**
+   * Set worker context for better logging
+   * @param workerId Worker ID
+   * @param artist Current artist being processed
+   */
+  public setWorkerContext(workerId: number, artist: string): void {
+      this.workerId = workerId;
+      this.contextArtist = artist;
   }
   
   /**

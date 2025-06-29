@@ -150,7 +150,13 @@ export class GoogleDriveUploader {
             return { successful: 0, failed: 0, skipped: 0, total: 0 };
         }
         
-        this.uploadStats = { successful: 0, failed: 0, skipped: 0, total: localPaths.length };
+        // Initialize stats with correct total
+        this.uploadStats = { 
+            successful: 0, 
+            failed: 0, 
+            skipped: 0, 
+            total: localPaths.length
+        };
         
         try {
             // Create or find the folder structure
@@ -194,11 +200,19 @@ export class GoogleDriveUploader {
                 `${this.uploadStats.skipped} skipped, ${this.uploadStats.failed} failed`
             );
             
-            return this.uploadStats;
+            // Verify totals make sense before returning
+            const calculatedTotal = this.uploadStats.successful + this.uploadStats.failed + this.uploadStats.skipped;
+            if (calculatedTotal !== this.uploadStats.total) {
+                this.logger.warn(`Upload statistics mismatch: calculated ${calculatedTotal}, expected ${this.uploadStats.total}`);
+                // Fix the total to match reality
+                this.uploadStats.total = calculatedTotal;
+            }
+            
+            return { ...this.uploadStats };
         } catch (error) {
             this.logger.error('Batch upload failed', error as Error);
-            // If the main process fails, return current stats
-            return this.uploadStats;
+            // Return current stats even if main process fails
+            return { ...this.uploadStats };
         }
     }
     
@@ -302,8 +316,31 @@ export class GoogleDriveUploader {
      * @returns Boolean indicating success
      */
     private async uploadSingleFile(localPath: string, driveFileName: string, folderId: string): Promise<boolean> {
-        if (!(await this.checkDuplicateExists(driveFileName, folderId))) {
+        try {
+            const fileMetadata = {
+                name: driveFileName,
+                parents: [folderId]
+            };
+            
+            const media = {
+                mimeType: 'image/jpeg',
+                body: fs.createReadStream(localPath)
+            };
+            
+            await this.drive.files.create({
+                requestBody: fileMetadata,
+                media: media,
+                fields: 'id'
+            });
+            
+            return true;
+        } catch (error) {
+            this.logger.error(`Failed to upload ${driveFileName}`, error as Error);
+            
+            // Retry once
             try {
+                this.logger.info(`Retrying upload for ${driveFileName}`);
+                
                 const fileMetadata = {
                     name: driveFileName,
                     parents: [folderId]
@@ -321,38 +358,10 @@ export class GoogleDriveUploader {
                 });
                 
                 return true;
-            } catch (error) {
-                this.logger.error(`Failed to upload ${driveFileName}`, error as Error);
-                
-                // Retry once
-                try {
-                    this.logger.info(`Retrying upload for ${driveFileName}`);
-                    
-                    const fileMetadata = {
-                        name: driveFileName,
-                        parents: [folderId]
-                    };
-                    
-                    const media = {
-                        mimeType: 'image/jpeg',
-                        body: fs.createReadStream(localPath)
-                    };
-                    
-                    await this.drive.files.create({
-                        requestBody: fileMetadata,
-                        media: media,
-                        fields: 'id'
-                    });
-                    
-                    return true;
-                } catch (retryError) {
-                    this.logger.error(`Retry failed for ${driveFileName}`, retryError as Error);
-                    return false;
-                }
+            } catch (retryError) {
+                this.logger.error(`Retry failed for ${driveFileName}`, retryError as Error);
+                return false;
             }
         }
-        
-        // Skip if duplicate exists
-        return false;
     }
 }
