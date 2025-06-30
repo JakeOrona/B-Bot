@@ -345,63 +345,21 @@ public async extractVideoUrls(): Promise<VideoData[]> {
                     if (match) tweetId = match[1];
                 }
                 
-                // Method 1: Look for video play buttons/overlays
-                const videoIndicators = tweet.querySelectorAll([
-                    '[data-testid="videoComponent"]',
-                    '[data-testid="videoPlayer"]', 
-                    'div[aria-label*="video"]',
-                    'div[aria-label*="Play"]',
-                    '.r-1p0dtai[aria-label*="Play"]', // Twitter's play button class
-                    'svg[aria-label="Play"]'
-                ].join(','));
-                
-                if (videoIndicators.length > 0) {
-                    console.log(`Found ${videoIndicators.length} video indicators in tweet ${tweetId}`);
-                    
-                    videoIndicators.forEach((indicator, index) => {
-                        // Look for thumbnail in nearby img elements
-                        const container = indicator.closest('div');
-                        const thumbnail = container?.querySelector('img[src*="video"], img[src*="amplify"]');
-                        
+                // Look for actual video elements with src attributes
+                const videoElements = tweet.querySelectorAll('video[src]');
+                videoElements.forEach((video, index) => {
+                    const src = video.getAttribute('src');
+                    if (src && src.includes('video.twimg.com')) {
                         videos.push({
-                            url: `VIDEO_PLACEHOLDER:${tweetId}_${index}`,
+                            url: src,
                             tweetId,
                             username,
                             index: videos.length,
-                            type: 'mp4',
-                            thumbnail: thumbnail?.getAttribute('src') || undefined
+                            type: src.includes('.gif') ? 'gif' : 'mp4'
                         });
-                    });
-                }
-                
-                const gifIndicators = tweet.querySelectorAll([
-                    'div[aria-label*="GIF"]',
-                    '.r-1p0dtai[aria-label*="GIF"]'
-                ].join(','));
-
-                // Add text-based GIF detection separately
-                const textElements = tweet.querySelectorAll('span, div');
-                textElements.forEach(el => {
-                    if (el.textContent && el.textContent.includes('GIF')) {
-                        // Add to gifIndicators logic here if needed
                     }
                 });
-                
-                if (gifIndicators.length > 0) {
-                    console.log(`Found ${gifIndicators.length} GIF indicators in tweet ${tweetId}`);
-                    
-                    gifIndicators.forEach((indicator, index) => {
-                        videos.push({
-                            url: `GIF_PLACEHOLDER:${tweetId}_${index}`,
-                            tweetId,
-                            username,
-                            index: videos.length,
-                            type: 'gif'
-                        });
-                    });
-                }
-            });
-            
+              });
             console.log(`Total video placeholders found: ${videos.length}`);
             return videos;
         }, this.currentUsername);
@@ -423,24 +381,15 @@ public async extractVideoUrls(): Promise<VideoData[]> {
 
   /**
    * Resolve video IDs to actual downloadable URLs
-   * @param videoData Array of video data with potential placeholders
-   * @returns Array of video data with resolved URLs
    */
   private async resolveVideoUrls(videoData: VideoData[]): Promise<VideoData[]> {
       const resolvedVideos: VideoData[] = [];
       
       for (const video of videoData) {
-          if (video.url.startsWith('VIDEO_ID:')) {
-              // Extract video ID and resolve to actual URL
-              const videoId = video.url.replace('VIDEO_ID:', '');
-              const resolvedUrl = await this.findWorkingVideoUrl(videoId);
-              
-              if (resolvedUrl) {
-                  resolvedVideos.push({
-                      ...video,
-                      url: resolvedUrl
-                  });
-              }
+          if (video.url.startsWith('GIF_PLACEHOLDER:') || video.url.startsWith('VIDEO_PLACEHOLDER:')) {
+              // Skip placeholders that can't be resolved
+              this.logger.warn(`Skipping unresolved video placeholder: ${video.url}`);
+              continue;
           } else {
               // URL is already resolved
               resolvedVideos.push(video);
