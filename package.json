@@ -22,7 +22,9 @@
     "start:distributed": "ts-node src/index.ts --processing-mode distributed",
     "start:concurrent": "ts-node src/index.ts --processing-mode max_concurrent",
     "start:batched": "ts-node src/index.ts --processing-mode batched",
+    "start:videos": "ts-node src/index.ts --processing-mode max_concurrent",
     
+    "scrape:videos": "ts-node src/index.ts --scrape-only --processing-mode max_concurrent",
     "scrape:distributed": "ts-node src/index.ts --scrape-only --processing-mode distributed",
     "scrape:concurrent": "ts-node src/index.ts --scrape-only --processing-mode max_concurrent",
     "scrape:batched": "ts-node src/index.ts --scrape-only --processing-mode batched",

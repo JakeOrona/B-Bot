@@ -10,6 +10,7 @@ import { Logger } from './utilities/Logger';
 import { GoogleDriveUploader } from './utilities/GoogleDriveUploader';
 import { FileCleanup } from './utilities/FileCleanup';
 import { ScraperError, ScraperErrorType, MediaData } from './interfaces/ScraperTypes';
+import { WorkerPool, ProcessingMode } from './utilities/ArtistWorker';
 import path from 'path';
 import fs from 'fs';
 import yargs from 'yargs';
@@ -187,6 +188,88 @@ class TwitterImageScraper {
         throw error;
         } finally {
         await this.cleanup();
+        }
+    }
+
+    /**
+     * Run concurrent media downloads (including videos)
+     */
+    public async runConcurrentMedia(): Promise<void> {
+        if (!this.browser || !this.context || !this.page) {
+            throw new Error('Scraper not initialized. Call initialize() first.');
+        }
+
+        try {
+            const authCredentials = this.configManager.getAuthCredentials();
+            const scraperConfig = this.configManager.getScraperConfig();
+            
+            // Get artists list
+            const artists = this.configManager.loadArtists();
+            this.logger.info(`Processing ${artists.length} artists using MAX_CONCURRENT mode for videos`);
+            
+            // Create worker pool with concurrent processing
+            const workerPool = new WorkerPool(
+                this.browser,
+                authCredentials,
+                scraperConfig,
+                this.googleDriveUploader,
+                3 // Max workers - increase for more concurrency
+            );
+            
+            // Use MAX_CONCURRENT mode for fastest processing
+            const results = await workerPool.processArtistsWithMode(artists, ProcessingMode.MAX_CONCURRENT);
+            
+            // Clean up
+            await workerPool.cleanup();
+            
+            // Log final stats including video breakdown
+            this.logMediaStats(results);
+            
+        } catch (error) {
+            this.logger.error('Fatal error in runConcurrentMedia', error as Error);
+            throw error;
+        }
+    }
+
+    /**
+     * Log detailed media statistics including video breakdown
+     */
+    private logMediaStats(results: any[]): void {
+        const totalArtists = results.length;
+        const successfulArtists = results.filter(r => r.success).length;
+        const failedArtists = totalArtists - successfulArtists;
+        
+        // Calculate totals by media type
+        const totals = results.reduce((acc, r) => {
+            if (r.stats?.byType) {
+                acc.images += r.stats.byType.images || 0;
+                acc.videos += r.stats.byType.videos || 0;
+                acc.gifs += r.stats.byType.gifs || 0;
+            }
+            acc.total += r.stats?.successful || 0;
+            return acc;
+        }, { images: 0, videos: 0, gifs: 0, total: 0 });
+        
+        const totalUploads = results.reduce((sum, r) => sum + (r.uploadResult?.successful || 0), 0);
+        
+        this.logger.success('='.repeat(60));
+        this.logger.success('CONCURRENT MEDIA DOWNLOAD STATISTICS');
+        this.logger.success('='.repeat(60));
+        this.logger.success(`Artists processed: ${successfulArtists}/${totalArtists}`);
+        this.logger.success(`Total downloads: ${totals.total}`);
+        this.logger.success(`  • Images: ${totals.images}`);
+        this.logger.success(`  • Videos: ${totals.videos}`);
+        this.logger.success(`  • GIFs: ${totals.gifs}`);
+        if (totalUploads > 0) {
+            this.logger.success(`Total uploads: ${totalUploads}`);
+        }
+        this.logger.success('='.repeat(60));
+        
+        if (failedArtists > 0) {
+            this.logger.warn(`${failedArtists} artists failed processing:`);
+            results.filter(r => !r.success).forEach(r => {
+                this.logger.warn(`  • @${r.artist}: ${r.error || 'Unknown error'}`);
+            });
         }
     }
     
@@ -627,7 +710,8 @@ class TwitterImageScraper {
         const isScrapeOnly = argv['scrape-only'] || argv.scrapeOnly || argv.s;
         const isUploadOnly = argv['upload-only'] || argv.uploadOnly || argv.u;
         const isDebugDrive = argv['debug-drive'] || argv.debugDrive || argv.d;
-        
+        const processingMode = argv['processing-mode'] || argv.processingMode || argv.p || 'distributed';
+
         // Debug mode takes precedence
         if (isDebugDrive) {
         console.log('Running in Google Drive debug mode...');
@@ -649,14 +733,24 @@ class TwitterImageScraper {
         
         // Determine which mode to run
         if (isScrapeOnly) {
-        console.log('Running in scrape-only mode...');
-        await scraper.runScrapeOnly();
+            console.log(`Running in scrape-only mode with ${processingMode} processing...`);
+            if (processingMode === 'max_concurrent') {
+                // Use concurrent processing for videos
+                await scraper.runConcurrentMedia();
+            } else {
+                await scraper.runScrapeOnly();
+            }
         } else if (isUploadOnly) {
-        console.log('Running in upload-only mode...');
-        await scraper.runUploadOnly();
+            console.log(`Running in upload-only mode with ${processingMode} processing...`);
+            await scraper.runUploadOnly();
         } else {
-        console.log('Running in full mode (scrape + upload)...');
-        await scraper.run();
+            console.log(`Running in full mode (scrape + upload) with ${processingMode} processing...`);
+            if (processingMode === 'max_concurrent') {
+                // Use concurrent processing for videos
+                await scraper.runConcurrentMedia();
+            } else {
+                await scraper.run();
+            }
         }
         
         process.exit(0);

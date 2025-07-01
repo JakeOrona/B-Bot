@@ -124,7 +124,13 @@ export class ArtistWorker {
                 return {
                     artist,
                     success: true,
-                    stats: { total: 0, successful: 0, failed: 0, skipped: 0 },
+                    stats: { 
+                        total: 0, 
+                        successful: 0, 
+                        failed: 0, 
+                        skipped: 0,
+                        byType: { images: 0, videos: 0, gifs: 0 }
+                    },
                     error: 'Account is private'
                 };
             }
@@ -134,7 +140,13 @@ export class ArtistWorker {
                 return {
                     artist,
                     success: true,
-                    stats: { total: 0, successful: 0, failed: 0, skipped: 0 },
+                    stats: { 
+                        total: 0, 
+                        successful: 0, 
+                        failed: 0, 
+                        skipped: 0,
+                        byType: { images: 0, videos: 0, gifs: 0 }
+                    },
                     error: 'Account is suspended'
                 };
             }
@@ -144,21 +156,21 @@ export class ArtistWorker {
             this.logger.info(`Worker ${this.workerId}: Found ${imageCount} images for @${artist}`);
             
             // Extract image URLs
-            const imageDataList = await twitterScraper.extractImageUrls();
-            
-            if (imageDataList.length === 0) {
-                this.logger.warn(`Worker ${this.workerId}: No images found for @${artist}`);
+            const mediaDataList = await twitterScraper.extractMediaUrls();
+
+            if (mediaDataList.length === 0) {
+                this.logger.warn(`Worker ${this.workerId}: No media found for @${artist}`);
                 return {
                     artist,
                     success: true,
-                    stats: { total: 0, successful: 0, failed: 0, skipped: 0 },
-                    error: 'No images found'
+                    stats: { total: 0, successful: 0, failed: 0, skipped: 0, byType: { images: 0, videos: 0, gifs: 0 } },
+                    error: 'No media found'
                 };
             }
             
             // Download images
-            this.logger.info(`Worker ${this.workerId}: Downloading ${imageDataList.length} images for @${artist}`);
-            const downloadResult = await twitterScraper.downloadImages(imageDataList);
+            this.logger.info(`Worker ${this.workerId}: Downloading ${mediaDataList.length} images for @${artist}`);
+            const downloadResult = await twitterScraper.downloadImages(mediaDataList);
             
             let uploadResult = undefined;
             
@@ -202,7 +214,13 @@ export class ArtistWorker {
             return {
                 artist,
                 success: false,
-                stats: { total: 0, successful: 0, failed: 0, skipped: 0 },
+                stats: { 
+                    total: 0, 
+                    successful: 0, 
+                    failed: 0, 
+                    skipped: 0,
+                    byType: { images: 0, videos: 0, gifs: 0 }
+                },
                 error: (error as Error).message
             };
         }
@@ -361,7 +379,13 @@ export class WorkerPool {
                 results.push({
                     artist,
                     success: false,
-                    stats: { total: 0, successful: 0, failed: 0, skipped: 0 },
+                    stats: { 
+                        total: 0, 
+                        successful: 0, 
+                        failed: 0, 
+                        skipped: 0,
+                        byType: { images: 0, videos: 0, gifs: 0 }
+                    },
                     error: (error as Error).message
                 });
             }
@@ -453,7 +477,13 @@ export class WorkerPool {
                     workerResults.push({
                         artist,
                         success: false,
-                        stats: { total: 0, successful: 0, failed: 0, skipped: 0 },
+                        stats: { 
+                            total: 0, 
+                            successful: 0, 
+                            failed: 0, 
+                            skipped: 0,
+                            byType: { images: 0, videos: 0, gifs: 0 }
+                        },
                         error: (error as Error).message
                     });
                 }
@@ -507,7 +537,13 @@ export class WorkerPool {
                     return {
                         artist,
                         success: false,
-                        stats: { total: 0, successful: 0, failed: 0, skipped: 0 },
+                        stats: { 
+                            total: 0, 
+                            successful: 0, 
+                            failed: 0, 
+                            skipped: 0,
+                            byType: { images: 0, videos: 0, gifs: 0 }
+                        },
                         error: (error as Error).message
                     } as WorkerResult;
                 });
@@ -595,17 +631,23 @@ export class WorkerPool {
         };
     } {
         const downloadStats: DownloadStats = {
-            total: 0,
-            successful: 0,
-            failed: 0,
-            skipped: 0
+            total: results.reduce((sum, r) => sum + (r.stats?.total || 0), 0),
+            successful: results.reduce((sum, r) => sum + (r.stats?.successful || 0), 0),
+            failed: results.reduce((sum, r) => sum + (r.stats?.failed || 0), 0),
+            skipped: results.reduce((sum, r) => sum + (r.stats?.skipped || 0), 0),
+            byType: {
+                images: results.reduce((sum, r) => sum + (r.stats?.byType?.images || 0), 0),
+                videos: results.reduce((sum, r) => sum + (r.stats?.byType?.videos || 0), 0),
+                gifs: results.reduce((sum, r) => sum + (r.stats?.byType?.gifs || 0), 0)
+            }
         };
         
-        const uploadStats = {
-            successful: 0,
-            failed: 0,
+        const uploadStats = { 
+            total: 0, 
+            successful: 0, 
+            failed: 0, 
             skipped: 0,
-            total: 0
+            byType: { images: 0, videos: 0, gifs: 0 }
         };
         
         let successfulArtists = 0;
